@@ -60,6 +60,10 @@ func main() {
 
 	kit, err := sensorkit.New(sensorkit.Options{
 		Name: "connector-tenable", Version: Version, ProductName: "openctemio-connector-tenable",
+		// The connector runs no tool process: the tool sandbox has nothing
+		// to confine (the connector's own process is confined by its
+		// container: non-root, read-only, no capabilities).
+		Sandbox: "off",
 	})
 	sensorkit.Exit(err)
 
