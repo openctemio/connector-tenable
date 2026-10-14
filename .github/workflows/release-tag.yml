@@ -1,0 +1,86 @@
+name: Release Tag
+
+# Step 2 of a release (openctemio/openctem api/docs/rfcs/RFC-037 §6): when a
+# release/vX.Y.Z PR merges into main, tag the merge commit vX.Y.Z (only if it
+# carries the release: its CHANGELOG section). The tag runs Release
+# (GoReleaser) and Images. Without RELEASE_TOKEN the tag is pushed with
+# GITHUB_TOKEN, which starts no workflow, so both are dispatched on the tag.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Number of the merged release PR (release/vX.Y.Z -> main)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+env:
+  RELEASE_SCRIPTS: .github/scripts/release
+
+jobs:
+  tag:
+    name: Tag
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      version: ${{ steps.pr.outputs.version }}
+    steps:
+      - name: Read the release PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefName,mergeCommit,state,baseRefName > pr.json
+          head_ref="$(jq -r .headRefName pr.json)"
+          [ "$(jq -r .state pr.json)" = MERGED ] || { echo "::error::PR $PR is not merged"; exit 1; }
+          [ "$(jq -r .baseRefName pr.json)" = main ] || { echo "::error::PR $PR does not target main"; exit 1; }
+          [[ "$head_ref" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$head_ref is not release/vX.Y.Z"; exit 1; }
+          { echo "version=${head_ref#release/}"; echo "merge=$(jq -r .mergeCommit.oid pr.json)"; } >> "$GITHUB_OUTPUT"
+
+      - name: Token
+        id: token
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -n "$RELEASE_TOKEN" ]; then echo "has_release_token=true" >> "$GITHUB_OUTPUT"; else echo "has_release_token=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Tag ${{ steps.pr.outputs.version }}
+        env:
+          VERSION: ${{ steps.pr.outputs.version }}
+          MERGE: ${{ steps.pr.outputs.merge }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: bash "$RELEASE_SCRIPTS/tag-release.sh" --version "$VERSION" --commit "$MERGE" --push
+
+      - name: Start the release workflows
+        if: steps.token.outputs.has_release_token != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pr.outputs.version }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
+          gh workflow run images.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"

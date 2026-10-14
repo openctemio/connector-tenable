@@ -1,0 +1,148 @@
+# GoReleaser configuration for the OpenCTEM Tenable.sc connector
+# Documentation: https://goreleaser.com
+#
+# Local testing:
+#   goreleaser check                    # Validate config
+#   goreleaser build --snapshot --clean # Build without publishing
+#   goreleaser release --snapshot --clean # Full release simulation
+
+version: 2
+
+project_name: connector-tenable
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: connector-tenable
+    main: .
+    binary: connector-tenable
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows ARM64 is not commonly used
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+      - zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE*
+      - CHANGELOG*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# Keyless Sigstore signature over checksums.txt (which pins every archive's
+# sha256): checksums.txt.sigstore.json is a cosign bundle whose certificate
+# names .github/workflows/release.yml at this tag. Non-container installs
+# verify it before trusting an archive (api RFC-031 §Phase 2).
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--bundle=${signature}"
+      - "${artifact}"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+      - typo
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "New Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Performance Improvements"
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "Security Updates"
+      regexp: '^.*?security(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: "Other Changes"
+      order: 999
+
+release:
+  github:
+    owner: openctemio
+    name: connector-tenable
+  draft: false
+  prerelease: auto
+  mode: replace
+  name_template: "v{{.Version}}"
+  header: |
+    ## OpenCTEM Tenable.sc connector v{{.Version}}
+
+    Connects a Tenable Security Center to OpenCTEM. The Tenable.sc API keys
+    stay in this connector. Setup: README.md and docs/tenable-sc.md.
+
+    ### Docker
+    ```bash
+    docker pull ghcr.io/openctemio/connector-tenable:v{{.Version}}
+    ```
+
+    ### Binary (Linux amd64)
+    ```bash
+    curl -sSL https://github.com/openctemio/connector-tenable/releases/download/v{{.Version}}/connector-tenable_{{.Version}}_linux_amd64.tar.gz | tar xz
+    ```
+
+    ### Verify
+    ```bash
+    # checksums.txt is signed (Sigstore, keyless) by the release workflow
+    cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity "https://github.com/openctemio/connector-tenable/.github/workflows/release.yml@refs/tags/v{{.Version}}"
+    sha256sum -c checksums.txt --ignore-missing
+
+    # the image is signed by digest by the images workflow
+    cosign verify ghcr.io/openctemio/connector-tenable:v{{.Version}} \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity "https://github.com/openctemio/connector-tenable/.github/workflows/images.yml@refs/tags/v{{.Version}}"
+    ```
+
+  footer: |
+    ---
+    **Full Changelog**: https://github.com/openctemio/connector-tenable/compare/{{ .PreviousTag }}...{{ .Tag }}

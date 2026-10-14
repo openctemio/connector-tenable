@@ -1,0 +1,261 @@
+name: Images
+
+# Builds ghcr.io/openctemio/connector-tenable for linux/amd64 and linux/arm64
+# on native runners.
+#
+# - pull requests: build and smoke-test the image, push nothing;
+# - main (and a weekly rebuild, for base-image fixes): publish `edge` and
+#   `sha-<commit>`;
+# - a v* tag: publish `vX.Y.Z` and `vX`.
+#
+# Every published image is signed with cosign, keyless (Sigstore): the
+# certificate names this workflow in openctemio/connector-tenable. Each
+# platform image carries an SBOM and a build provenance attestation. Verify:
+#
+#   cosign verify ghcr.io/openctemio/connector-tenable@sha256:<digest> \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp '^https://github\.com/openctemio/connector-tenable/\.github/workflows/images\.yml@refs/(heads/main|tags/v.*)$'
+#
+# A release tag created by the Release Tag workflow (with the job token) does
+# not start workflows, so Release Tag dispatches this one on the tag.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/openctemio
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.vars.outputs.publish }}
+      version: ${{ steps.vars.outputs.version }}
+      tags: ${{ steps.vars.outputs.tags }}
+    steps:
+      # The ref reaches the shell through env, never pasted into the script,
+      # and a tag is validated before any later job uses it.
+      - name: Versions and tags
+        id: vars
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          publish=false
+          short="${SHA:0:12}"
+          version="dev-${short}"
+          tags=""
+          if [ "$EVENT" != pull_request ]; then
+            if [[ "$REF" == refs/tags/v* ]]; then
+              version="${REF#refs/tags/}"
+              if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::release tags are vX.Y.Z"
+                exit 1
+              fi
+              major="${version%%.*}"
+              tags="${version} ${major}"
+              publish=true
+            elif [ "$REF" = refs/heads/main ]; then
+              # The first tag is immutable: the index is pushed and signed
+              # under it before the moving tag (edge) points at it.
+              tags="sha-${short} edge"
+              publish=true
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      NAME: connector-tenable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build locally and smoke-test first: nothing is pushed when a tool is
+      # broken. The push below reuses this build's cache.
+      - name: Build for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ needs.prepare.outputs.version }}
+          load: true
+          tags: smoke:connector
+          provenance: false
+          sbom: false
+
+      # The binary runs as the non-root user under the default seccomp
+      # profile, read-only, without capabilities, and refuses to start with
+      # no Tenable.sc config (exit 2) instead of idling.
+      - name: Smoke test
+        run: |
+          docker run --rm --read-only --cap-drop ALL smoke:connector -version
+          set +e
+          docker run --rm --read-only --cap-drop ALL smoke:connector >/tmp/out 2>&1
+          rc=$?
+          set -e
+          cat /tmp/out
+          [ "$rc" -eq 2 ] && grep -q "no Tenable.sc instance is configured" /tmp/out
+          [ "$(docker image inspect smoke:connector --format '{{.Config.User}}')" = "65532:65532" ]
+
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push by digest (with SBOM and provenance)
+        if: needs.prepare.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ needs.prepare.outputs.version }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+
+      - name: Export the digest
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$DIGEST'"; exit 1; }
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: needs.prepare.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing: cosign exchanges the job OIDC token for a
+      # short-lived certificate naming this workflow.
+      id-token: write
+    env:
+      NAME: connector-tenable
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Signed before it is published: the index goes out under the first,
+      # immutable tag (vX.Y.Z or sha-<commit>) only, is signed, and only then
+      # do the moving tags (vX, edge) point at it. A pipeline that resolves a
+      # moving tag never gets a digest without a signature.
+      - name: Multi-platform index
+        id: index
+        working-directory: /tmp/digests
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        run: |
+          image="${REGISTRY}/${NAME}"
+          first="${TAGS%% *}"
+          docker buildx imagetools create -t "${image}:${first}" $(printf "${image}@sha256:%s " *)
+          digest="$(docker buildx imagetools inspect "${image}:${first}" --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign (cosign keyless) and verify
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          image="${REGISTRY}/${NAME}@${DIGEST}"
+          # --recursive signs the index and each platform manifest.
+          cosign sign --yes --recursive "$image"
+          cosign verify "$image" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${WORKFLOW_REF}" > /dev/null
+
+      - name: Moving tags (after signing)
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        run: |
+          image="${REGISTRY}/${NAME}"
+          rest="${TAGS#* }"
+          [ "$rest" = "$TAGS" ] && exit 0
+          for t in $rest; do
+            docker buildx imagetools create -t "${image}:${t}" "${image}@${DIGEST}"
+            got="$(docker buildx imagetools inspect "${image}:${t}" --format '{{json .Manifest}}' | jq -r .digest)"
+            [ "$got" = "$DIGEST" ] || { echo "::error::${t} points at ${got}, not the signed ${DIGEST}"; exit 1; }
+          done
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        run: |
+          {
+            echo "### ${REGISTRY}/${NAME}"
+            echo '```'
+            echo "${REGISTRY}/${NAME}@${DIGEST} (signed)"
+            for t in $TAGS; do echo "${REGISTRY}/${NAME}:${t}"; done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
