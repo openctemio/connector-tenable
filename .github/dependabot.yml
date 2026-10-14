@@ -1,0 +1,74 @@
+# Dependabot configuration for the OpenCTEM Tenable.sc connector
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Go modules
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "openctemio/security"
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "deps(go)"
+    groups:
+      # Group minor and patch updates together
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Security updates are always separate
+    ignore:
+      # Ignore major version updates for stability
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "openctemio/security"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(actions)"
+    # One weekly PR for minor/patch bumps of the SHA-pinned actions; majors stay separate.
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Docker base-image updates are intentionally NOT managed by Dependabot.
+  # Across the five Dockerfiles every external base image is on public.ecr.aws
+  # (ECR Public), to avoid Docker Hub pull rate limits in CI — the one exception
+  # is the distroless runtime stage in Dockerfile, which is on gcr.io.
+  # Dependabot's docker updater cannot authenticate/query ECR Public for tags:
+  # every run gets `401 DENIED "Not Authorized"` from
+  # https://public.ecr.aws/v2/docker/library/golang/tags/list, so the job only
+  # ever errored and never produced a PR. It failed weekly for eight consecutive
+  # weeks here. Bump base images manually instead.
+  #
+  # Base-image CVEs are still covered: the "Docker Image Scan" job in
+  # .github/workflows/security.yml builds the image and runs Trivy over it at
+  # CRITICAL,HIGH. Note that job builds the default Dockerfile only, so the
+  # variant images (nuclei / betterleaks / semgrep / trivy) rely on the filesystem
+  # Trivy scan plus manual bumps.
+  #
+  # Removed to match api and ui, which hit the identical failure (api#213, ui#194).

@@ -1,0 +1,12 @@
+# Binaries and build output
+/connector-tenable
+/tenablesc-mock
+bin/
+dist/
+*.test
+*.out
+coverage.*
+
+# Local config and keys
+*.key
+.env

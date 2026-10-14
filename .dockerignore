@@ -1,0 +1,9 @@
+.git
+.github
+dist
+bin
+*.md
+!README.md
+docs
+**/*_test.go
+**/testdata
