@@ -10,3 +10,11 @@ coverage.*
 # Local config and keys
 *.key
 .env
+
+# Secrets and runtime state: never committed
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+/data/
