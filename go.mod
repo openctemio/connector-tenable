@@ -1,6 +1,6 @@
 module github.com/openctemio/connector-tenable
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/openctemio/ctis v1.6.1-0.20261019060712-e3550c7f219c
