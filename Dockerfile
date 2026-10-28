@@ -9,7 +9,7 @@
 # Base images are pinned by digest (tag kept for readability). Refresh with
 #   docker buildx imagetools inspect <image>:<tag>
 
-FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+FROM --platform=$BUILDPLATFORM ghcr.io/openctemio/mirror/golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
