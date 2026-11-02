@@ -3,8 +3,8 @@ module github.com/openctemio/connector-tenable
 go 1.26.10
 
 require (
-	github.com/openctemio/ctis v1.6.3
-	github.com/openctemio/sdk-go v0.37.0
+	github.com/openctemio/ctis v1.6.4
+	github.com/openctemio/sdk-go v0.40.0
 	golang.org/x/time v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )
