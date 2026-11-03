@@ -445,14 +445,14 @@ func (c *Client) Analysis(ctx context.Context, q Query, offset, limit int) (Page
 	type wireQuery struct {
 		Type        string   `json:"type"`
 		Tool        string   `json:"tool"`
-		SourceType  string   `json:"sourceType"`
+		DataSource  string   `json:"sourceType"`
 		StartOffset int      `json:"startOffset"`
 		EndOffset   int      `json:"endOffset"`
 		Filters     []Filter `json:"filters"`
 	}
 	body := struct {
 		Type       string    `json:"type"`
-		SourceType string    `json:"sourceType"`
+		DataSource string    `json:"sourceType"`
 		ScanID     string    `json:"scanID,omitempty"`
 		View       string    `json:"view,omitempty"`
 		Query      wireQuery `json:"query"`
@@ -460,11 +460,11 @@ func (c *Client) Analysis(ctx context.Context, q Query, offset, limit int) (Page
 		SortDir    string    `json:"sortDir,omitempty"`
 	}{
 		Type:       "vuln",
-		SourceType: q.SourceType,
+		DataSource: q.DataSource,
 		ScanID:     q.ScanID,
 		View:       q.View,
 		Query: wireQuery{
-			Type: "vuln", Tool: q.Tool, SourceType: q.SourceType,
+			Type: "vuln", Tool: q.Tool, DataSource: q.DataSource,
 			StartOffset: offset, EndOffset: offset + limit, Filters: q.Filters,
 		},
 		SortField: q.SortField,

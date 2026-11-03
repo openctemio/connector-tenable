@@ -23,7 +23,7 @@ func TestClient_PaginationExclusiveEndOffset(t *testing.T) {
 	f := newFakeSC(t)
 	inst := f.instance()
 	c := f.client(t, inst, nil)
-	q := Query{Tool: "vulndetails", SourceType: "cumulative"}
+	q := Query{Tool: "vulndetails", DataSource: "cumulative"}
 
 	p1, err := c.Analysis(context.Background(), q, 0, 2)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestClient_PaginationExclusiveEndOffset(t *testing.T) {
 	if qs[0].Query.StartOffset != 0 || qs[0].Query.EndOffset != 2 || qs[1].Query.StartOffset != 2 || qs[1].Query.EndOffset != 4 {
 		t.Fatalf("offsets: %+v", qs)
 	}
-	if qs[0].Type != "vuln" || qs[0].SourceType != "cumulative" || qs[0].Query.Tool != "vulndetails" {
+	if qs[0].Type != "vuln" || qs[0].DataSource != "cumulative" || qs[0].Query.Tool != "vulndetails" {
 		t.Fatalf("query shape: %+v", qs[0])
 	}
 }
@@ -58,7 +58,7 @@ func TestClient_PageLargerThanAskedIsRefused(t *testing.T) {
 		return true
 	})
 	c := f.client(t, f.instance(), nil)
-	if _, err := c.Analysis(context.Background(), Query{Tool: "vulndetails", SourceType: "cumulative"}, 0, 2); err == nil {
+	if _, err := c.Analysis(context.Background(), Query{Tool: "vulndetails", DataSource: "cumulative"}, 0, 2); err == nil {
 		t.Fatal("a page with more results than asked must fail")
 	}
 }
@@ -190,7 +190,7 @@ func TestClient_MalformedJSON(t *testing.T) {
 		return true
 	})
 	c := f.client(t, f.instance(), nil)
-	_, err := c.Analysis(context.Background(), Query{Tool: "vulndetails", SourceType: "cumulative"}, 0, 2)
+	_, err := c.Analysis(context.Background(), Query{Tool: "vulndetails", DataSource: "cumulative"}, 0, 2)
 	if err == nil || !strings.Contains(err.Error(), "malformed JSON") {
 		t.Fatalf("want malformed JSON error, got %v", err)
 	}

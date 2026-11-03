@@ -103,12 +103,13 @@ func TestSync_EndToEnd(t *testing.T) {
 		if r.Metadata.Branch != nil {
 			t.Fatalf("report %d carries a branch: a pull must never look like a full default-branch scan", i)
 		}
-		if r.Metadata.CoverageType != "incremental" {
+		if r.Metadata.CoverageType != ctis.CoverageIncremental {
 			t.Fatalf("report %d coverage %q", i, r.Metadata.CoverageType)
 		}
 		if err := ctis.CheckFindingAssets(r); err != nil {
 			t.Fatalf("report %d: %v", i, err)
 		}
+		assertValid2(t, r)
 	}
 	fs := p.findings()
 	if len(fs) != 4 {
@@ -116,11 +117,8 @@ func TestSync_EndToEnd(t *testing.T) {
 	}
 	var mitigated int
 	for _, fd := range fs {
-		if fd.Properties["tenable_state"] == stateMitigated {
+		if fd.Status == ctis.FindingStatusResolved {
 			mitigated++
-			if fd.Status != ctis.FindingStatusResolved {
-				t.Fatalf("mitigated row status %q", fd.Status)
-			}
 		}
 	}
 	if mitigated != 1 {
@@ -176,7 +174,7 @@ func TestSync_FullModeHasNoLastSeenFilter(t *testing.T) {
 		if strings.Contains(string(raw), "lastSeen") {
 			t.Fatalf("full sync filtered on lastSeen: %s", raw)
 		}
-		if q.Query.SourceType == "patched" && !strings.Contains(string(raw), `"0:30"`) {
+		if q.Query.DataSource == "patched" && !strings.Contains(string(raw), `"0:30"`) {
 			t.Fatalf("full sync mitigated window: %s", raw)
 		}
 	}
@@ -206,8 +204,11 @@ func TestSync_Chunking(t *testing.T) {
 	if len(p.reports) != 2 || len(p.reports[0].Findings) != maxFindingsPerReport || len(p.reports[1].Findings) != 5 {
 		t.Fatalf("chunks: %d reports", len(p.reports))
 	}
-	if p.reports[0].Metadata.ID == p.reports[1].Metadata.ID {
-		t.Fatal("chunks share a report id")
+	for i, r := range p.reports {
+		if r.Metadata.ID != "" {
+			t.Fatalf("report %d sets metadata.id %q: the client stamps the producer UUIDv7", i, r.Metadata.ID)
+		}
+		assertValid2(t, r)
 	}
 }
 
@@ -312,7 +313,7 @@ func TestMapping_Golden(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range p.reports {
-		r.Metadata.Timestamp = testNow
+		r.Metadata.GeneratedAt = testNow
 	}
 	got, err := json.MarshalIndent(p.reports, "", "  ")
 	if err != nil {
@@ -348,9 +349,25 @@ func TestMapping_Fields(t *testing.T) {
 		t.Fatalf("log4shell severity/category: %+v", log4)
 	}
 	v := log4.Vulnerability
-	if v == nil || len(v.CVEIDs) != 3 || v.CVEID != "CVE-2021-44228" || v.CVSSVersion != "3.x" || v.CVSSScore != 10 ||
-		v.VPRScore != 10 || !v.ExploitAvailable || v.EPSSScore < 0.97 {
+	if v == nil || len(ctis.CVEs(v)) != 3 || ctis.CVEs(v)[0] != "CVE-2021-44228" ||
+		!ctis.HasThreatSignal(v, ctis.ThreatSignalPublicExploit) {
 		t.Fatalf("log4shell vulnerability: %+v", v)
+	}
+	if s := scoreOf(log4, ctis.ScoreSystemCVSS, ""); s == nil || *s.Value != 10 || !strings.HasPrefix(s.Version, "3.") || s.Source != "tenable" {
+		t.Fatalf("log4shell cvss: %+v", log4.Scores)
+	}
+	if s := scoreOf(log4, ctis.ScoreSystemVendor, "vpr"); s == nil || *s.Value != 10 {
+		t.Fatalf("log4shell vpr: %+v", log4.Scores)
+	}
+	if s := scoreOf(log4, ctis.ScoreSystemEPSS, ""); s == nil || *s.Value < 0.97 {
+		t.Fatalf("log4shell epss: %+v", log4.Scores)
+	}
+	if log4.Remediation == nil || log4.Remediation.PatchPublishedAt == nil ||
+		log4.Remediation.PatchPublishedAt.Format("2006-01-02") != "2021-12-10" || !*log4.Remediation.IsFixAvailable {
+		t.Fatalf("log4shell remediation: %+v", log4.Remediation)
+	}
+	if log4.Native == nil || log4.Native.VulnID != "156860" || !hasSourceRef(log4.SourceRefs, "plugin:156860") {
+		t.Fatalf("log4shell plugin identity: %+v %+v", log4.Native, log4.SourceRefs)
 	}
 	if strings.ContainsRune(log4.Description, 0) || strings.ContainsRune(log4.Description, '‮') {
 		t.Fatal("control or bidi characters kept")
@@ -360,36 +377,156 @@ func TestMapping_Fields(t *testing.T) {
 			t.Fatalf("non-http reference kept: %q", ref)
 		}
 	}
-	if log4.Properties["tenable_patch_pub_date"] != "2021-12-10T00:00:00Z" || log4.Properties["tenable_acr"] != 9.0 ||
-		log4.Properties["tenable_aes"] != 870.0 {
-		t.Fatalf("log4shell properties: %v", log4.Properties)
-	}
 	if _, ok := log4.Properties["tenable_plugin_mod_date"]; !ok {
 		t.Fatal("plugin mod date should fall back to the plugin metadata")
 	}
-	if log4.Network == nil || log4.Network.Port != 8443 || log4.Network.Protocol != "tcp" ||
+	if log4.Network == nil || log4.Network.Port != 8443 || log4.Network.Transport != ctis.TransportTCP ||
 		log4.Fingerprint != "tenable_sc:5:10.20.0.15:156860:8443/tcp" {
 		t.Fatalf("log4shell network/fingerprint: %+v %q", log4.Network, log4.Fingerprint)
 	}
 	ssl := byPlugin["51192"]
-	if ssl.Properties["tenable_accept_risk"] != true || ssl.Category != "General" || ssl.Vulnerability.VPRScore != 0 {
+	if ssl.Suppression == nil || ssl.Suppression.Status != "accepted" || ssl.Category != "General" ||
+		scoreOf(ssl, ctis.ScoreSystemVendor, "vpr") != nil {
 		t.Fatalf("ssl: %+v", ssl)
 	}
 	trace := byPlugin["10287"]
 	if trace.Network != nil {
 		t.Fatal("port 0 is host-level: no network location")
 	}
-	if _, ok := trace.Properties["tenable_acr"]; ok {
+	th := assetOf(t, p, trace.AssetRef)
+	if _, ok := th.Properties["tenable_acr"]; ok {
 		t.Fatal("ACR 42 is out of range and must be dropped")
 	}
-	if _, ok := trace.Properties["tenable_aes"]; ok {
+	if _, ok := th.Properties["tenable_aes"]; ok {
 		t.Fatal("AES -5 is out of range and must be dropped")
 	}
 	if trace.Remediation != nil {
 		t.Fatal("n/a solution kept")
 	}
 	ms := byPlugin["97833"]
-	if ms.Status != ctis.FindingStatusResolved || ms.Properties["tenable_last_mitigated"] == nil || ms.Vulnerability.EPSSScore != 0.943 {
+	if e := scoreOf(ms, ctis.ScoreSystemEPSS, ""); ms.Status != ctis.FindingStatusResolved || ms.SourceLifecycle == nil ||
+		ms.SourceLifecycle.LastFixedAt == nil || e == nil || *e.Value != 0.943 {
 		t.Fatalf("mitigated: %+v", ms)
+	}
+}
+
+// assertValid2 checks a pushed report against the CTIS 2.0 rules once the
+// client has stamped its producer id, and that no reference is UUID-shaped.
+func assertValid2(t *testing.T, r *ctis.Report) {
+	t.Helper()
+	c := *r
+	c.Metadata.ID = ctis.NewReportID()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("report is not valid CTIS 2.0: %v", err)
+	}
+	if c.Version != ctis.SchemaVersion {
+		t.Fatalf("version %q", c.Version)
+	}
+	for _, a := range r.Assets {
+		if ctis.IsUUIDShaped(a.ID) {
+			t.Fatalf("asset ref %q is UUID-shaped", a.ID)
+		}
+	}
+	for _, f := range r.Findings {
+		if ctis.IsUUIDShaped(f.AssetRef) || ctis.IsUUIDShaped(f.ID) {
+			t.Fatalf("finding ref %q/%q is UUID-shaped", f.AssetRef, f.ID)
+		}
+	}
+	for _, rel := range r.Relationships {
+		if ctis.IsUUIDShaped(rel.FromRef) || ctis.IsUUIDShaped(rel.ToRef) {
+			t.Fatalf("relationship ref is UUID-shaped: %+v", rel)
+		}
+	}
+}
+
+func scoreOf(f ctis.Finding, sys ctis.ScoreSystem, label string) *ctis.Score {
+	for i := range f.Scores {
+		if f.Scores[i].System == sys && f.Scores[i].Label == label {
+			return &f.Scores[i]
+		}
+	}
+	return nil
+}
+
+func hasSourceRef(refs []ctis.SourceRef, id string) bool {
+	for _, r := range refs {
+		if r.System == "tenable_sc" && r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func assetOf(t *testing.T, p *fakePusher, ref string) ctis.Asset {
+	t.Helper()
+	for _, r := range p.reports {
+		for _, a := range r.Assets {
+			if a.ID == ref {
+				return a
+			}
+		}
+	}
+	t.Fatalf("no asset %q in any report", ref)
+	return ctis.Asset{}
+}
+
+// A report never carries a platform id: the command id stays in the
+// transport, and every asset value is the canonical form of its type.
+func TestSync_NoPlatformIDsAndCanonicalAssets(t *testing.T) {
+	f := newFakeSC(t)
+	p := &fakePusher{}
+	if _, err := testExecutor(f, f.instance(), p).Execute(context.Background(), syncCmd(t, platformPayload(ModeIncremental))); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range p.reports {
+		raw, _ := json.Marshal(r)
+		if strings.Contains(string(raw), "cmd-1") {
+			t.Fatalf("report %d carries the platform command id: %s", i, raw)
+		}
+		if r.Metadata.ID != "" {
+			t.Fatalf("report %d metadata.id %q", i, r.Metadata.ID)
+		}
+		if r.Metadata.Channel != ctis.ChannelIntegration {
+			t.Fatalf("report %d channel %q", i, r.Metadata.Channel)
+		}
+		for _, a := range r.Assets {
+			c, err := ctis.CanonicalAssetValue(a.Type, a.Value)
+			if err != nil || c != a.Value {
+				t.Fatalf("asset %s %q is not canonical (%q, %v)", a.Type, a.Value, c, err)
+			}
+		}
+	}
+}
+
+// A finding on a port belongs to a service asset (host:port/transport) that
+// its host exposes; a host-level finding stays on the host.
+func TestSync_PortFindingsBelongToServiceAssets(t *testing.T) {
+	f := newFakeSC(t)
+	p := &fakePusher{}
+	if _, err := testExecutor(f, f.instance(), p).Execute(context.Background(), syncCmd(t, platformPayload(ModeIncremental))); err != nil {
+		t.Fatal(err)
+	}
+	byPlugin := map[string]ctis.Finding{}
+	for _, fd := range p.findings() {
+		byPlugin[fd.RuleID] = fd
+	}
+	log4 := byPlugin["156860"]
+	svc := assetOf(t, p, log4.AssetRef)
+	if svc.Type != ctis.AssetTypeService || svc.Value != "app01.corp.example:8443/tcp" || svc.Technical == nil || svc.Technical.Service.Port != 8443 {
+		t.Fatalf("service asset: %+v", svc)
+	}
+	var exposed bool
+	for _, r := range p.reports {
+		for _, rel := range r.Relationships {
+			if rel.Type == ctis.RelExposes && rel.ToRef == svc.ID {
+				exposed = assetOf(t, p, rel.FromRef).Type != ""
+			}
+		}
+	}
+	if !exposed {
+		t.Fatal("no exposes relationship from the host to its service")
+	}
+	if h := assetOf(t, p, byPlugin["10287"].AssetRef); h.Type == ctis.AssetTypeService {
+		t.Fatalf("a host-level finding must stay on the host: %+v", h)
 	}
 }

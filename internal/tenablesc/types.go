@@ -260,8 +260,8 @@ type Filter struct {
 // platform).
 type Query struct {
 	Tool       string // vulndetails, sumip
-	SourceType string // cumulative, patched, individual
-	// ScanID and View select one scan result (SourceType individual).
+	DataSource string // cumulative, patched, individual
+	// ScanID and View select one scan result (DataSource individual).
 	ScanID    string
 	View      string
 	Filters   []Filter

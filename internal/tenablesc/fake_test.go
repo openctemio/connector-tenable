@@ -43,13 +43,13 @@ type fakeSC struct {
 
 type analysisWire struct {
 	Type       string `json:"type"`
-	SourceType string `json:"sourceType"`
+	DataSource string `json:"sourceType"`
 	ScanID     string `json:"scanID"`
 	View       string `json:"view"`
 	SortField  string `json:"sortField"`
 	Query      struct {
 		Tool        string   `json:"tool"`
-		SourceType  string   `json:"sourceType"`
+		DataSource  string   `json:"sourceType"`
 		StartOffset int      `json:"startOffset"`
 		EndOffset   int      `json:"endOffset"`
 		Filters     []Filter `json:"filters"`
@@ -135,7 +135,7 @@ func (f *fakeSC) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.queries = append(f.queries, q)
-		rows := f.datasets[q.Query.Tool+"/"+q.Query.SourceType]
+		rows := f.datasets[q.Query.Tool+"/"+q.Query.DataSource]
 		f.mu.Unlock()
 		start, end := q.Query.StartOffset, q.Query.EndOffset
 		if start > len(rows) {

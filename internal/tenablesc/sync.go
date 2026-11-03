@@ -239,9 +239,10 @@ type syncRun struct {
 	records int // rows read so far, all queries
 	chunk   int
 	pending []ctis.Finding
-	assets  map[string]ctis.Asset // assets of pending findings
-	emitted map[string]bool       // asset ids pushed in any report
-	ipSeen  map[string]*hostSeen  // ip -> first repository and host uuid
+	assets  map[string]ctis.Asset        // assets of pending findings
+	rels    map[string]ctis.Relationship // relationships of pending findings
+	emitted map[string]bool              // asset ids pushed in any report
+	ipSeen  map[string]*hostSeen         // ip -> first repository and host uuid
 	// assessed, when set (a scan pull), collects every host the scan
 	// result lists, findings or not.
 	assessed *assessedHosts
@@ -369,7 +370,7 @@ func (r *syncRun) resultQuery(tool string, withSeverity bool) Query {
 	if tool == "sumip" {
 		sort = "ip"
 	}
-	return Query{Tool: tool, SourceType: "individual", ScanID: r.job.scanResultID, View: "all",
+	return Query{Tool: tool, DataSource: "individual", ScanID: r.job.scanResultID, View: "all",
 		Filters: f, SortField: sort, SortDir: sortDir}
 }
 
@@ -386,7 +387,7 @@ func (r *syncRun) vulnQuery(sourceType string) Query {
 	case r.job.mode == ModeIncremental:
 		f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
 	}
-	return Query{Tool: "vulndetails", SourceType: sourceType, Filters: f, SortField: sortField, SortDir: sortDir}
+	return Query{Tool: "vulndetails", DataSource: sourceType, Filters: f, SortField: sortField, SortDir: sortDir}
 }
 
 // pages runs q page by page. The first page's total is checked against the
@@ -408,7 +409,7 @@ func (r *syncRun) pages(q Query, each func(rows []json.RawMessage) error) error 
 		if total < 0 {
 			total = p.Total
 			if total > budget {
-				return fmt.Errorf("%w: %d %s records, %d left of %d", ErrTooManyRecords, total, q.SourceType, max(budget, 0), r.job.inst.Limits.MaxRecords)
+				return fmt.Errorf("%w: %d %s records, %d left of %d", ErrTooManyRecords, total, q.DataSource, max(budget, 0), r.job.inst.Limits.MaxRecords)
 			}
 		}
 		if len(p.Results) == 0 {
@@ -457,7 +458,7 @@ func (r *syncRun) query(q Query, state string) error {
 				continue
 			}
 			r.noteHost(h)
-			f := r.mapper.finding(row, h, state)
+			f, ra := r.mapper.finding(row, h, state)
 			if state == stateMitigated {
 				r.counts.mitigated++
 				r.newestMitigated = later(r.newestMitigated, r.mapper.timestamp(row.LastMitigated))
@@ -465,7 +466,7 @@ func (r *syncRun) query(q Query, state string) error {
 				r.counts.open++
 				r.newestSeen = later(r.newestSeen, r.mapper.timestamp(row.LastSeen))
 			}
-			if err := r.add(f, h.asset); err != nil {
+			if err := r.add(f, ra); err != nil {
 				return err
 			}
 		}
@@ -483,7 +484,7 @@ func (r *syncRun) hosts() error {
 		if r.job.mode == ModeIncremental {
 			f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
 		}
-		q = Query{Tool: "sumip", SourceType: "cumulative", Filters: f, SortField: "ip", SortDir: sortDir}
+		q = Query{Tool: "sumip", DataSource: "cumulative", Filters: f, SortField: "ip", SortDir: sortDir}
 	}
 	return r.pages(q, func(raw []json.RawMessage) error {
 		for _, b := range raw {
@@ -507,7 +508,17 @@ func (r *syncRun) hosts() error {
 			if r.assets == nil {
 				r.assets = map[string]ctis.Asset{}
 			}
-			r.assets[h.assetID] = h.asset
+			for _, a := range h.assets() {
+				r.assets[a.ID] = a
+			}
+			if rels := h.relationships(); len(rels) > 0 {
+				if r.rels == nil {
+					r.rels = map[string]ctis.Relationship{}
+				}
+				for _, rel := range rels {
+					r.rels[string(rel.Type)+"|"+rel.FromRef+"|"+rel.ToRef] = rel
+				}
+			}
 			if len(r.assets) >= maxFindingsPerReport {
 				if err := r.flush(); err != nil {
 					return err
@@ -571,12 +582,23 @@ func (r *syncRun) enrich(rows []*vulnRow) error {
 	return nil
 }
 
-func (r *syncRun) add(f ctis.Finding, a ctis.Asset) error {
+// add queues a finding with the assets and relationships it needs. Every
+// report carries the machine and service assets of its findings, so a
+// relationship never names an asset of another document.
+func (r *syncRun) add(f ctis.Finding, ra rowAssets) error {
 	if r.assets == nil {
 		r.assets = map[string]ctis.Asset{}
 	}
-	if _, ok := r.assets[a.ID]; !ok {
-		r.assets[a.ID] = a
+	for _, a := range ra.assets {
+		if _, ok := r.assets[a.ID]; !ok {
+			r.assets[a.ID] = a
+		}
+	}
+	if r.rels == nil {
+		r.rels = map[string]ctis.Relationship{}
+	}
+	for _, rel := range ra.rels {
+		r.rels[string(rel.Type)+"|"+rel.FromRef+"|"+rel.ToRef] = rel
 	}
 	r.pending = append(r.pending, f)
 	if len(r.pending) >= maxFindingsPerReport {
@@ -591,15 +613,19 @@ func (r *syncRun) flush() error {
 	if len(r.pending) == 0 && len(r.assets) == 0 {
 		return nil
 	}
+	// metadata.id stays empty: the client stamps a producer-generated UUIDv7
+	// (a retry re-sends the same one). The binding to the platform command
+	// lives in the transport, never in the document.
 	report := &ctis.Report{
-		Version: "1.0",
+		Version: ctis.SchemaVersion,
 		Metadata: ctis.ReportMetadata{
-			ID:           fmt.Sprintf("%s-%d", r.cmdID, r.chunk),
-			Timestamp:    r.e.clock(),
-			SourceType:   "scanner",
-			CoverageType: firstNonEmpty(r.job.coverage, "incremental"),
+			GeneratedAt:  r.e.clock(),
+			Channel:      ctis.ChannelIntegration,
+			CoverageType: coverageOf(r.job.coverage),
+			Profiles:     []ctis.Profile{ctis.ProfileCore, ctis.ProfileDiscovery, ctis.ProfileVulnerability},
+			SourceRefs:   r.sourceRefs(),
 		},
-		Tool: &ctis.Tool{Name: ToolName, Vendor: toolVendor, Version: r.version},
+		Tool: &ctis.Tool{Name: ToolName, Vendor: toolVendor, Version: r.version, Techniques: []ctis.Technique{ctis.TechniqueVA}},
 	}
 	ids := make([]string, 0, len(r.assets))
 	for id := range r.assets {
@@ -611,6 +637,14 @@ func (r *syncRun) flush() error {
 		r.emitted[id] = true
 	}
 	report.Findings = r.pending
+	keys := make([]string, 0, len(r.rels))
+	for k := range r.rels {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		report.Relationships = append(report.Relationships, r.rels[k])
+	}
 	res, err := r.e.Pusher.PushFindings(r.ctx, report)
 	if err != nil {
 		return fmt.Errorf("push report %d: %w", r.chunk, err)
@@ -622,7 +656,32 @@ func (r *syncRun) flush() error {
 	r.chunk++
 	r.pending = nil
 	r.assets = nil
+	r.rels = nil
 	return nil
+}
+
+// coverageOf maps the job's coverage word to the CTIS coverage type; an
+// unknown word reads as incremental, the narrowest claim.
+func coverageOf(s string) ctis.CoverageType {
+	switch c := ctis.CoverageType(s); c {
+	case ctis.CoverageFull, ctis.CoverageIncremental, ctis.CoveragePartial:
+		return c
+	}
+	return ctis.CoverageIncremental
+}
+
+// sourceRefs name the Tenable.sc side of the report: the configured
+// instance and, for a scan pull, the scan result. Both are Tenable's own
+// names, never platform ids.
+func (r *syncRun) sourceRefs() []ctis.SourceRef {
+	var out []ctis.SourceRef
+	if n := sanitizeIdentifier(r.job.inst.Name); n != "" {
+		out = append(out, ctis.SourceRef{System: sourceSystem, ID: "instance:" + n})
+	}
+	if id := sanitizeIdentifier(r.job.scanResultID); id != "" {
+		out = append(out, ctis.SourceRef{System: sourceSystem, ID: "scan_result:" + id})
+	}
+	return out
 }
 
 func (r *syncRun) metadata(dur time.Duration) map[string]any {
