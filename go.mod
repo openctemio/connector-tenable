@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/openctemio/contract v1.1.1
-	github.com/openctemio/sdk-go v0.45.2-0.20261103064034-494ba39b461c
+	github.com/openctemio/sdk-go v0.46.0
 	golang.org/x/time v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )

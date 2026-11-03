@@ -45,8 +45,8 @@ github.com/openctemio/ctis/v2/interop/sarif v0.1.0 h1:2dK8SYu2Y/soZBM5UOTIlaLzrU
 github.com/openctemio/ctis/v2/interop/sarif v0.1.0/go.mod h1:ARJgk9nOK/kzPmXymt41HVP+aOn+j8BGDO8YRKCJUzQ=
 github.com/openctemio/ctis/v2/interop/spdx v0.1.0 h1:K5TuTScidghvGRvsvL6UR9uzQuAyQpR+S7b90ExdwMI=
 github.com/openctemio/ctis/v2/interop/spdx v0.1.0/go.mod h1:Z2QqE5zD0X6reTQxcbsXPDM9vD7T0DvofSFNEkr/0RY=
-github.com/openctemio/sdk-go v0.45.2-0.20261103064034-494ba39b461c h1:MaQ5H9nI4WxWPgmU83/2jFUSE7f8iphbUwoSiPUDlRY=
-github.com/openctemio/sdk-go v0.45.2-0.20261103064034-494ba39b461c/go.mod h1:OiT6RD00cbbCQO0Bz6BWb0xlmVhGK3l6F+GolEe/eSM=
+github.com/openctemio/sdk-go v0.46.0 h1:fFHhBDQ67Lt9NqAlfjxJq9qPJagNqIp7hfTeRoO7NzU=
+github.com/openctemio/sdk-go v0.46.0/go.mod h1:OiT6RD00cbbCQO0Bz6BWb0xlmVhGK3l6F+GolEe/eSM=
 github.com/prometheus/client_golang v1.25.0 h1:cDtW1TcFsMi1RJc8khwCKB4VhzwV04aKqbYtNOXuiK0=
 github.com/prometheus/client_golang v1.25.0/go.mod h1:j2X/4/kaQHLPnmyEU8zjmkndo1T317VpCIQEml8LTKk=
 github.com/prometheus/client_model v0.6.3 h1:O0jaTVAYNxTHYInEPFJt5I3+sN8zqBtVMPTB1qyxiEo=
