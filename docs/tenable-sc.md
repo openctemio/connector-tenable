@@ -119,7 +119,7 @@ finding by absence. A cancelled command stops the scan.
 **Tracking.** While the scan runs, the connector reports the checks Tenable.sc
 completed as liveness on its heartbeat, so OpenCTEM can tell a slow scan from
 a stuck one. When it ends, the command result says how each target ended (the
-CTIS per-target outcome): `done` when the scan result lists the host (an
+per-target outcome of the CTIS profile): `done` when the scan result lists the host (an
 address, an address inside a range, or a host by its DNS name; a live host
 with no findings counts), `failed: unreachable` when a scan that completed and
 imported does not list it (it did not reply; this is never read as "nothing
@@ -205,13 +205,32 @@ files, owned by root and readable only by the connector's user.
 
 ## What is sent to OpenCTEM
 
-- Hosts as assets (DNS name, else IP), with IP, NetBIOS name, OS, MAC
-  addresses, Tenable host UUID, repository, ACR and AES.
-- Vulnerabilities as findings: plugin id and name, severity, all CVEs,
-  CVSS (v3, else v2, with the version; v4 as a property), VPR, EPSS,
-  exploit availability and frameworks, plugin family and type, publication
-  and patch dates, first and last seen, port and protocol, plugin output
-  (at most 64 KiB), accept-risk and recast-risk flags, and the open or
+- Reports are CTIS 2.0 documents (media type `application/vnd.ctis+json;
+  version=2.0`) with `metadata.channel` `integration`, the tool `tenable_sc`
+  and the technique `va`. A document never carries a platform id: the report
+  id is a producer UUIDv7 stamped by the client, and the binding to the
+  command stays in the transport. Tenable's own names travel as
+  `source_refs` with system `tenable_sc`: `instance:<name>` and
+  `scan_result:<id>` on the document, `host:<uuid>` on an asset, and
+  `plugin:<id>` and `vuln:<uuid>` on a finding.
+- Hosts as assets with canonical values: a `host` named by its DNS name (with
+  an `ip_address` asset for its address and a `resolves_to` relationship), or
+  an `ip_address` when Tenable.sc has no DNS name. NetBIOS name and MAC
+  addresses are identity hints and identifiers, the OS is a technology, the
+  repository, ACR and AES stay in the asset's opaque `properties`.
+- A finding on a port belongs to a `service` asset (`host:port/transport`,
+  for tcp, udp and sctp) that its host `exposes`; a finding without a port (or
+  with another protocol) belongs to the host. Every report carries the host
+  and service assets of its findings.
+- Vulnerabilities as findings: rule (plugin) id and name, severity, all CVEs
+  in `vulnerability.ids`, `scores[]` (CVSS v3, else v2, and v4, each with its
+  version and vector; VPR as a `vendor` score labelled `vpr`; EPSS), a
+  `public_exploit` threat signal when an exploit is available, the plugin
+  family, publication and patch dates (the patch date is
+  `remediation.patch_published_at` and marks the fix available), first and
+  last seen, the port as the network location, the plugin output as a
+  `raw_text` evidence item (at most 64 KiB), accept-risk as a suppression, the
+  last mitigation as `source_lifecycle.last_fixed_at`, and the open or
   mitigated state. Mitigated rows carry the status `resolved`; the platform
   decides what to do with them.
 - On completion: counts, the Tenable.sc version and the licensed and active

@@ -1,44 +1,34 @@
 [
   {
-    "version": "1.0",
+    "version": "2.0",
     "metadata": {
-      "id": "cmd-1-0",
-      "timestamp": "2026-10-04T12:00:00Z",
-      "source_type": "scanner",
-      "coverage_type": "incremental"
+      "id": "",
+      "generated_at": "2026-10-04T12:00:00Z",
+      "channel": "integration",
+      "source_refs": [
+        {
+          "system": "tenable_sc",
+          "id": "instance:sc-test"
+        }
+      ],
+      "coverage_type": "incremental",
+      "profiles": [
+        "core",
+        "discovery",
+        "vulnerability"
+      ]
     },
     "tool": {
       "name": "tenable_sc",
       "version": "6.4.0",
-      "vendor": "Tenable"
+      "vendor": "Tenable",
+      "techniques": [
+        "va"
+      ]
     },
     "assets": [
       {
-        "id": "host-10.20.0.16",
-        "type": "ip_address",
-        "value": "10.20.0.16",
-        "name": "FILESRV",
-        "properties": {
-          "ip_address": "10.20.0.16",
-          "netbios_name": "FILESRV",
-          "os": "Microsoft Windows Server 2019",
-          "tenable_repository": "Datacenter",
-          "tenable_repository_id": "5"
-        }
-      },
-      {
-        "id": "host-2001:db8::10",
-        "type": "ip_address",
-        "value": "2001:db8::10",
-        "name": "2001:db8::10",
-        "properties": {
-          "ip_address": "2001:db8::10",
-          "tenable_repository": "Branch IPv6",
-          "tenable_repository_id": "7"
-        }
-      },
-      {
-        "id": "host-app01.corp.example",
+        "id": "host:app01.corp.example",
         "type": "host",
         "value": "app01.corp.example",
         "name": "app01.corp.example",
@@ -47,16 +37,105 @@
             "00:50:56:aa:bb:cc"
           ]
         },
-        "properties": {
+        "identity_hints": {
           "fqdn": "app01.corp.example",
-          "ip_address": "10.20.0.15",
-          "netbios_name": "CORP\\APP01",
-          "os": "Linux Kernel 5.15",
+          "netbios_name": "CORP\\APP01"
+        },
+        "technologies": [
+          {
+            "name": "Linux Kernel 5.15",
+            "categories": [
+              "operating_system"
+            ]
+          }
+        ],
+        "source_refs": [
+          {
+            "system": "tenable_sc",
+            "id": "host:4c2f6d1e-0a7b-4b39-9d55-1f0e2a3b4c5d"
+          }
+        ],
+        "properties": {
           "tenable_acr": 9,
           "tenable_aes": 870,
-          "tenable_host_uuid": "4c2f6d1e-0a7b-4b39-9d55-1f0e2a3b4c5d",
           "tenable_repository": "Datacenter",
           "tenable_repository_id": "5"
+        }
+      },
+      {
+        "id": "ip:10.20.0.15",
+        "type": "ip_address",
+        "value": "10.20.0.15",
+        "name": "10.20.0.15"
+      },
+      {
+        "id": "ip:10.20.0.16",
+        "type": "ip_address",
+        "value": "10.20.0.16",
+        "name": "FILESRV",
+        "identity_hints": {
+          "netbios_name": "FILESRV"
+        },
+        "technologies": [
+          {
+            "name": "Microsoft Windows Server 2019",
+            "categories": [
+              "operating_system"
+            ]
+          }
+        ],
+        "properties": {
+          "tenable_repository": "Datacenter",
+          "tenable_repository_id": "5"
+        }
+      },
+      {
+        "id": "ip:2001:db8::10",
+        "type": "ip_address",
+        "value": "2001:db8::10",
+        "name": "2001:db8::10",
+        "properties": {
+          "tenable_repository": "Branch IPv6",
+          "tenable_repository_id": "7"
+        }
+      },
+      {
+        "id": "svc:10.20.0.16:443/tcp",
+        "type": "service",
+        "value": "10.20.0.16:443/tcp",
+        "name": "10.20.0.16:443/tcp",
+        "technical": {
+          "service": {
+            "port": 443,
+            "transport": "tcp",
+            "state": "open"
+          }
+        }
+      },
+      {
+        "id": "svc:10.20.0.16:445/tcp",
+        "type": "service",
+        "value": "10.20.0.16:445/tcp",
+        "name": "10.20.0.16:445/tcp",
+        "technical": {
+          "service": {
+            "port": 445,
+            "transport": "tcp",
+            "state": "open"
+          }
+        }
+      },
+      {
+        "id": "svc:app01.corp.example:8443/tcp",
+        "type": "service",
+        "value": "app01.corp.example:8443/tcp",
+        "name": "app01.corp.example:8443/tcp",
+        "technical": {
+          "service": {
+            "port": 8443,
+            "transport": "tcp",
+            "state": "open"
+          }
         }
       }
     ],
@@ -69,31 +148,42 @@
         "category": "CGI abuses",
         "rule_id": "156860",
         "rule_name": "Apache Log4Shell RCE detection via callback correlation (Direct Check HTTP)",
-        "asset_ref": "host-app01.corp.example",
+        "asset_ref": "svc:app01.corp.example:8443/tcp",
         "network": {
           "host": "app01.corp.example",
           "port": 8443,
-          "protocol": "tcp"
+          "transport": "tcp"
         },
-        "evidence": "\u003cplugin_output\u003eSent: ${jndi:ldap://x}\u003c/plugin_output\u003e",
         "vulnerability": {
-          "cve_id": "CVE-2021-44228",
-          "cve_ids": [
-            "CVE-2021-44228",
-            "CVE-2021-45046",
-            "CVE-2021-45105"
+          "ids": [
+            {
+              "type": "cve",
+              "id": "CVE-2021-44228"
+            },
+            {
+              "type": "cve",
+              "id": "CVE-2021-45046"
+            },
+            {
+              "type": "cve",
+              "id": "CVE-2021-45105"
+            }
           ],
-          "cvss_version": "3.x",
-          "cvss_score": 10,
-          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
           "published_at": "2021-12-09T00:00:00Z",
-          "exploit_available": true,
-          "epss_score": 0.97565,
-          "vpr_score": 10,
-          "cpe": "cpe:/a:apache:log4j"
+          "cpe": "cpe:/a:apache:log4j",
+          "threat_signals": [
+            {
+              "type": "public_exploit",
+              "source": "tenable",
+              "as_of": "2026-10-04T12:00:00Z"
+            }
+          ]
         },
         "remediation": {
-          "recommendation": "Upgrade to Apache Log4j version 2.17.1 or later."
+          "recommendation": "Upgrade to Apache Log4j version 2.17.1 or later.",
+          "solution_type": "vendor_fix",
+          "is_fix_available": true,
+          "patch_published_at": "2021-12-10T00:00:00Z"
         },
         "references": [
           "https://logging.apache.org/log4j/2.x/security.html",
@@ -102,28 +192,57 @@
         "fingerprint": "tenable_sc:5:10.20.0.15:156860:8443/tcp",
         "first_seen_at": "2023-12-08T01:46:40Z",
         "last_seen_at": "2026-09-21T14:13:20Z",
+        "native": {
+          "scheme": "nessus",
+          "vuln_id": "156860",
+          "family": "CGI abuses"
+        },
+        "scores": [
+          {
+            "system": "cvss",
+            "version": "3.1",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "value": 10,
+            "source": "tenable"
+          },
+          {
+            "system": "vendor",
+            "value": 10,
+            "label": "vpr",
+            "source": "tenable"
+          },
+          {
+            "system": "epss",
+            "value": 0.97565,
+            "source": "tenable"
+          }
+        ],
+        "evidence_items": [
+          {
+            "kind": "raw_text",
+            "version": 1,
+            "label": "plugin output",
+            "text": "\u003cplugin_output\u003eSent: ${jndi:ldap://x}\u003c/plugin_output\u003e"
+          }
+        ],
+        "source_refs": [
+          {
+            "system": "tenable_sc",
+            "id": "plugin:156860"
+          },
+          {
+            "system": "tenable_sc",
+            "id": "vuln:a1b2c3d4-0000-4000-8000-000000000001"
+          }
+        ],
         "properties": {
-          "tenable_accept_risk": false,
-          "tenable_acr": 9,
-          "tenable_aes": 870,
           "tenable_check_type": "remote",
           "tenable_exploit_ease": "Exploits are available",
           "tenable_exploit_frameworks": "Metasploit (Log4Shell HTTP Header Injection), Core Impact",
-          "tenable_host_uuid": "4c2f6d1e-0a7b-4b39-9d55-1f0e2a3b4c5d",
-          "tenable_patch_pub_date": "2021-12-10T00:00:00Z",
-          "tenable_plugin_family": "CGI abuses",
-          "tenable_plugin_id": "156860",
           "tenable_plugin_mod_date": "2023-11-14T22:13:20Z",
           "tenable_plugin_pub_date": "2021-12-14T00:00:00Z",
           "tenable_plugin_type": "remote",
-          "tenable_previously_mitigated": false,
-          "tenable_recast_risk": false,
-          "tenable_repository": "Datacenter",
-          "tenable_repository_id": "5",
           "tenable_risk_factor": "Critical",
-          "tenable_state": "open",
-          "tenable_vuln_pub_date": "2021-12-09T00:00:00Z",
-          "tenable_vuln_uuid": "a1b2c3d4-0000-4000-8000-000000000001",
           "tenable_xrefs": "IAVA:2021-A-0573, CISA-KNOWN-EXPLOITED:2021/12/24"
         }
       },
@@ -135,16 +254,11 @@
         "category": "General",
         "rule_id": "51192",
         "rule_name": "SSL Certificate Cannot Be Trusted",
-        "asset_ref": "host-10.20.0.16",
+        "asset_ref": "svc:10.20.0.16:443/tcp",
         "network": {
           "host": "10.20.0.16",
           "port": 443,
-          "protocol": "tcp"
-        },
-        "vulnerability": {
-          "cvss_version": "3.x",
-          "cvss_score": 6.5,
-          "cvss_vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
+          "transport": "tcp"
         },
         "remediation": {
           "recommendation": "Purchase or generate a proper SSL certificate for this service."
@@ -152,18 +266,35 @@
         "fingerprint": "tenable_sc:5:10.20.0.16:51192:443/tcp",
         "first_seen_at": "2023-11-14T22:13:20Z",
         "last_seen_at": "2026-09-10T00:26:40Z",
+        "suppression": {
+          "kind": "risk_accepted",
+          "status": "accepted",
+          "reason": "Internal CA, accepted by IT until 2027"
+        },
+        "native": {
+          "scheme": "nessus",
+          "vuln_id": "51192",
+          "family": "General"
+        },
+        "scores": [
+          {
+            "system": "cvss",
+            "version": "3.0",
+            "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+            "value": 6.5,
+            "source": "tenable"
+          }
+        ],
+        "source_refs": [
+          {
+            "system": "tenable_sc",
+            "id": "plugin:51192"
+          }
+        ],
         "properties": {
-          "tenable_accept_risk": true,
-          "tenable_accept_risk_comment": "Internal CA, accepted by IT until 2027",
           "tenable_check_type": "remote",
-          "tenable_plugin_family": "General",
-          "tenable_plugin_id": "51192",
           "tenable_plugin_type": "remote",
-          "tenable_previously_mitigated": true,
-          "tenable_recast_risk": false,
-          "tenable_repository": "Datacenter",
-          "tenable_repository_id": "5",
-          "tenable_state": "open"
+          "tenable_previously_mitigated": true
         }
       },
       {
@@ -174,20 +305,24 @@
         "category": "General",
         "rule_id": "10287",
         "rule_name": "Traceroute Information",
-        "asset_ref": "host-2001:db8::10",
+        "asset_ref": "ip:2001:db8::10",
         "fingerprint": "tenable_sc:7:2001:db8::10:10287:0/udp",
         "first_seen_at": "2023-11-14T22:13:20Z",
         "last_seen_at": "2026-09-15T19:20:00Z",
+        "native": {
+          "scheme": "nessus",
+          "vuln_id": "10287",
+          "family": "General"
+        },
+        "source_refs": [
+          {
+            "system": "tenable_sc",
+            "id": "plugin:10287"
+          }
+        ],
         "properties": {
-          "tenable_accept_risk": false,
-          "tenable_plugin_family": "General",
-          "tenable_plugin_id": "10287",
-          "tenable_previously_mitigated": false,
           "tenable_recast_risk": true,
-          "tenable_recast_risk_comment": "Recast from info to low by policy",
-          "tenable_repository": "Branch IPv6",
-          "tenable_repository_id": "7",
-          "tenable_state": "open"
+          "tenable_recast_risk_comment": "Recast from info to low by policy"
         }
       },
       {
@@ -198,25 +333,31 @@
         "category": "Windows : Microsoft Bulletins",
         "rule_id": "97833",
         "rule_name": "MS17-010: Security Update for Microsoft Windows SMB Server",
-        "asset_ref": "host-10.20.0.16",
+        "asset_ref": "svc:10.20.0.16:445/tcp",
         "network": {
           "host": "10.20.0.16",
           "port": 445,
-          "protocol": "tcp"
+          "transport": "tcp"
         },
         "vulnerability": {
-          "cve_id": "CVE-2017-0143",
-          "cve_ids": [
-            "CVE-2017-0143",
-            "CVE-2017-0144"
+          "ids": [
+            {
+              "type": "cve",
+              "id": "CVE-2017-0143"
+            },
+            {
+              "type": "cve",
+              "id": "CVE-2017-0144"
+            }
           ],
-          "cvss_version": "3.x",
-          "cvss_score": 8.1,
-          "cvss_vector": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
           "published_at": "2017-03-14T00:00:00Z",
-          "exploit_available": true,
-          "epss_score": 0.943,
-          "vpr_score": 9.8
+          "threat_signals": [
+            {
+              "type": "public_exploit",
+              "source": "tenable",
+              "as_of": "2026-10-04T12:00:00Z"
+            }
+          ]
         },
         "remediation": {
           "recommendation": "Apply the MS17-010 update."
@@ -225,39 +366,99 @@
         "first_seen_at": "2020-09-13T12:26:40Z",
         "last_seen_at": "2026-05-28T20:26:40Z",
         "status": "resolved",
+        "native": {
+          "scheme": "nessus",
+          "vuln_id": "97833",
+          "family": "Windows : Microsoft Bulletins"
+        },
+        "scores": [
+          {
+            "system": "cvss",
+            "version": "3.0",
+            "vector": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "value": 8.1,
+            "source": "tenable"
+          },
+          {
+            "system": "vendor",
+            "value": 9.8,
+            "label": "vpr",
+            "source": "tenable"
+          },
+          {
+            "system": "epss",
+            "value": 0.943,
+            "source": "tenable"
+          }
+        ],
+        "source_lifecycle": {
+          "last_fixed_at": "2026-09-20T10:26:40Z"
+        },
+        "source_refs": [
+          {
+            "system": "tenable_sc",
+            "id": "plugin:97833"
+          }
+        ],
         "properties": {
-          "tenable_accept_risk": false,
-          "tenable_host_uuid": "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4",
-          "tenable_last_mitigated": "2026-09-20T10:26:40Z",
-          "tenable_plugin_family": "Windows : Microsoft Bulletins",
-          "tenable_plugin_id": "97833",
           "tenable_plugin_type": "local",
-          "tenable_previously_mitigated": true,
-          "tenable_recast_risk": false,
-          "tenable_repository": "Datacenter",
-          "tenable_repository_id": "5",
-          "tenable_state": "mitigated",
-          "tenable_vuln_pub_date": "2017-03-14T00:00:00Z"
+          "tenable_previously_mitigated": true
         }
+      }
+    ],
+    "relationships": [
+      {
+        "type": "exposes",
+        "from_ref": "host:app01.corp.example",
+        "to_ref": "svc:app01.corp.example:8443/tcp"
+      },
+      {
+        "type": "exposes",
+        "from_ref": "ip:10.20.0.16",
+        "to_ref": "svc:10.20.0.16:443/tcp"
+      },
+      {
+        "type": "exposes",
+        "from_ref": "ip:10.20.0.16",
+        "to_ref": "svc:10.20.0.16:445/tcp"
+      },
+      {
+        "type": "resolves_to",
+        "from_ref": "host:app01.corp.example",
+        "to_ref": "ip:10.20.0.15"
       }
     ]
   },
   {
-    "version": "1.0",
+    "version": "2.0",
     "metadata": {
-      "id": "cmd-1-1",
-      "timestamp": "2026-10-04T12:00:00Z",
-      "source_type": "scanner",
-      "coverage_type": "incremental"
+      "id": "",
+      "generated_at": "2026-10-04T12:00:00Z",
+      "channel": "integration",
+      "source_refs": [
+        {
+          "system": "tenable_sc",
+          "id": "instance:sc-test"
+        }
+      ],
+      "coverage_type": "incremental",
+      "profiles": [
+        "core",
+        "discovery",
+        "vulnerability"
+      ]
     },
     "tool": {
       "name": "tenable_sc",
       "version": "6.4.0",
-      "vendor": "Tenable"
+      "vendor": "Tenable",
+      "techniques": [
+        "va"
+      ]
     },
     "assets": [
       {
-        "id": "host-10.20.0.99",
+        "id": "ip:10.20.0.99",
         "type": "ip_address",
         "value": "10.20.0.99",
         "name": "PRINTER7",
@@ -266,9 +467,10 @@
             "00:11:22:33:44:55"
           ]
         },
+        "identity_hints": {
+          "netbios_name": "PRINTER7"
+        },
         "properties": {
-          "ip_address": "10.20.0.99",
-          "netbios_name": "PRINTER7",
           "tenable_repository": "Datacenter",
           "tenable_repository_id": "5"
         }

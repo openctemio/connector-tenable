@@ -1,6 +1,8 @@
 package tenablesc
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -55,67 +57,169 @@ type mapper struct {
 	plugins map[string]*plugin // enrichment, may miss ids
 }
 
-// hostKey identifies the asset a row belongs to.
+// Tenable system name of every source_refs entry the connector writes. The
+// ids carry their kind as a prefix: plugin:<id>, vuln:<uuid>, host:<uuid>,
+// instance:<name>, scan_result:<id>.
+const sourceSystem = "tenable_sc"
+
+// hostKey identifies the assets a row belongs to. asset is the machine
+// (a host named by its DNS name, or an ip_address); ipAsset is the machine's
+// address as an asset of its own when the host is named by a DNS name.
 type hostKey struct {
 	assetID string
 	asset   ctis.Asset
+	ipAsset *ctis.Asset
 	ip      string
 	repo    string
 	hostID  string
 }
 
-// host maps a row's host part. ok is false when the row names no usable
-// host (no valid IP and no valid DNS name).
-func (m *mapper) host(r *vulnRow) (hostKey, bool) {
-	ip := normalizeIP(r.IP)
-	fqdn := normalizeHostname(r.DNSName)
-	value := fqdn
-	if value == "" {
-		value = ip
+// assets returns every asset the machine contributes to a document.
+func (h hostKey) assets() []ctis.Asset {
+	out := []ctis.Asset{h.asset}
+	if h.ipAsset != nil {
+		out = append(out, *h.ipAsset)
 	}
-	if value == "" {
+	return out
+}
+
+// relationships links the machine's name to its address.
+func (h hostKey) relationships() []ctis.Relationship {
+	if h.ipAsset == nil {
+		return nil
+	}
+	return []ctis.Relationship{{Type: ctis.RelResolvesTo, FromRef: h.asset.ID, ToRef: h.ipAsset.ID}}
+}
+
+// docRef builds a document-local reference: it follows
+// ctis.DocumentRefPattern, is never UUID-shaped, and is at most 255
+// characters (a longer value is replaced by its digest).
+func docRef(kind, value string) string {
+	ref := kind + ":" + value
+	if len(ref) <= 255 && refSafe(ref) {
+		return ref
+	}
+	sum := sha256.Sum256([]byte(value))
+	return kind + ":sha256-" + hex.EncodeToString(sum[:16])
+}
+
+func refSafe(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._:/@+=~%-", r):
+		default:
+			return false
+		}
+	}
+	return s != ""
+}
+
+// host maps a row's host part. ok is false when the row names no usable
+// host (no valid IP and no valid DNS name). Every value is the canonical
+// form of its asset type.
+func (m *mapper) host(r *vulnRow) (hostKey, bool) {
+	ip := canonical(ctis.AssetTypeIPAddress, normalizeIP(r.IP))
+	fqdn := canonical(ctis.AssetTypeHost, normalizeHostname(r.DNSName))
+	if fqdn == "" && ip == "" {
 		return hostKey{}, false
 	}
-	assetType := ctis.AssetTypeHost
-	if net.ParseIP(value) != nil {
-		assetType = ctis.AssetTypeIPAddress
-	}
 	netbios := sanitizeText(r.NetBIOSName, capIdentifier)
-	name := value
-	if fqdn == "" && netbios != "" {
-		name = netbios
-	}
-	props := ctis.Properties{}
-	setStr(props, "ip_address", ip)
-	setStr(props, "fqdn", fqdn)
-	setStr(props, "netbios_name", netbios)
-	setStr(props, "os", sanitizeText(r.OperatingSystem, capShort))
 	hostUUID := firstNonEmpty(sanitizeIdentifier(r.HostUUID), sanitizeIdentifier(r.UUID))
-	setStr(props, "tenable_host_uuid", hostUUID)
 	repoID := sanitizeIdentifier(string(r.Repository.ID))
-	setStr(props, "tenable_repository_id", repoID)
-	setStr(props, "tenable_repository", sanitizeText(r.Repository.Name, capIdentifier))
+
+	asset := ctis.Asset{Properties: ctis.Properties{}}
+	var ipAsset *ctis.Asset
+	if fqdn != "" {
+		asset.Type, asset.Value, asset.Name = ctis.AssetTypeHost, fqdn, fqdn
+		asset.ID = docRef("host", fqdn)
+		if ip != "" {
+			ia := ctis.Asset{ID: docRef("ip", ip), Type: ctis.AssetTypeIPAddress, Value: ip, Name: ip}
+			ipAsset = &ia
+		}
+	} else {
+		asset.Type, asset.Value, asset.Name = ctis.AssetTypeIPAddress, ip, ip
+		asset.ID = docRef("ip", ip)
+		if netbios != "" {
+			asset.Name = netbios
+		}
+	}
+	if netbios != "" || fqdn != "" {
+		asset.IdentityHints = &ctis.IdentityHints{FQDN: fqdn, NetBIOSName: netbios}
+	}
+	if os := sanitizeText(r.OperatingSystem, capShort); os != "" {
+		asset.Technologies = []ctis.Technology{{Name: os, Categories: []string{"operating_system"}}}
+	}
+	if hostUUID != "" {
+		asset.SourceRefs = []ctis.SourceRef{{System: sourceSystem, ID: "host:" + hostUUID}}
+	}
+	setStr(asset.Properties, "tenable_repository_id", repoID)
+	setStr(asset.Properties, "tenable_repository", sanitizeText(r.Repository.Name, capIdentifier))
 	if v, ok := clampRange(r.ACRScore, 1, 10); ok {
-		props["tenable_acr"] = v
+		asset.Properties["tenable_acr"] = v
 	}
 	if v, ok := clampRange(r.AssetExposureScore, 0, 1000); ok {
-		props["tenable_aes"] = v
+		asset.Properties["tenable_aes"] = v
 	}
-	asset := ctis.Asset{
-		ID:         "host-" + value,
-		Type:       assetType,
-		Value:      value,
-		Name:       name,
-		Properties: props,
+	if len(asset.Properties) == 0 {
+		asset.Properties = nil
 	}
 	if macs := splitMACs(r.MACAddress); len(macs) > 0 {
 		asset.Identifiers = &ctis.AssetIdentifiers{MACAddresses: macs}
 	}
-	return hostKey{assetID: asset.ID, asset: asset, ip: ip, repo: repoID, hostID: hostUUID}, true
+	return hostKey{assetID: asset.ID, asset: asset, ipAsset: ipAsset, ip: ip, repo: repoID, hostID: hostUUID}, true
 }
 
-// finding maps a vulnerability row (state open or mitigated).
-func (m *mapper) finding(r *vulnRow, h hostKey, state string) ctis.Finding {
+// canonical returns the canonical form of value for an asset type, or ""
+// when it has none (the value is then not used as an asset).
+func canonical(t ctis.AssetType, value string) string {
+	if value == "" {
+		return ""
+	}
+	c, err := ctis.CanonicalAssetValue(t, value)
+	if err != nil {
+		return ""
+	}
+	return c
+}
+
+// serviceOf names the service a finding's port belongs to. ok is false for a
+// host-level finding (no port) or a protocol that is not tcp, udp or sctp
+// (icmp findings belong to the host).
+func serviceOf(h hostKey, port int, proto string) (a ctis.Asset, rel ctis.Relationship, ok bool) {
+	if port < 1 || port > 65535 {
+		return a, rel, false
+	}
+	hostValue := firstNonEmpty(h.asset.Value)
+	value, err := ctis.CanonicalService(hostValue, port, proto)
+	if err != nil {
+		return a, rel, false
+	}
+	tr := ctis.Transport(strings.ToLower(proto))
+	a = ctis.Asset{
+		ID:    docRef("svc", strings.NewReplacer("[", "", "]", "").Replace(value)),
+		Type:  ctis.AssetTypeService,
+		Value: value,
+		Name:  value,
+		Technical: &ctis.AssetTechnical{Service: &ctis.ServiceTechnical{
+			Port: port, Transport: tr, State: ctis.PortOpen,
+		}},
+	}
+	rel = ctis.Relationship{Type: ctis.RelExposes, FromRef: h.asset.ID, ToRef: a.ID}
+	return a, rel, true
+}
+
+// rowAssets are the assets and relationships one finding adds to a report
+// besides its own finding: the machine, and the service a port names.
+type rowAssets struct {
+	assets []ctis.Asset
+	rels   []ctis.Relationship
+}
+
+// finding maps a vulnerability row (state open or mitigated). The finding
+// belongs to the service asset when the row names a tcp/udp/sctp port, and
+// to the machine otherwise.
+func (m *mapper) finding(r *vulnRow, h hostKey, state string) (ctis.Finding, rowAssets) {
 	pluginID := sanitizeIdentifier(string(r.PluginID))
 	p := m.plugins[pluginID]
 	title := sanitizeText(r.PluginName, capTitle)
@@ -136,25 +240,46 @@ func (m *mapper) finding(r *vulnRow, h hostKey, state string) ctis.Finding {
 	}
 	hostRef := firstNonEmpty(h.ip, h.asset.Value)
 
+	ra := rowAssets{assets: h.assets(), rels: h.relationships()}
+	assetRef := h.assetID
+	if svc, rel, ok := serviceOf(h, port, proto); ok {
+		ra.assets = append(ra.assets, svc)
+		ra.rels = append(ra.rels, rel)
+		assetRef = svc.ID
+	}
+
 	f := ctis.Finding{
 		Type:     ctis.FindingTypeVulnerability,
 		Title:    title,
 		Severity: mapSeverity(int64(r.Severity.ID)),
-		AssetRef: h.assetID,
+		AssetRef: assetRef,
 		RuleID:   pluginID,
 		RuleName: title,
 		Category: family,
 		Fingerprint: fmt.Sprintf("%s:%s:%s:%s:%d/%s",
 			ToolName, h.repo, hostRef, pluginID, port, proto),
+		Native: &ctis.NativeIdentity{Scheme: ctis.NativeSchemeNessus, VulnID: pluginID, Family: family},
+	}
+	if pluginID != "" {
+		f.SourceRefs = append(f.SourceRefs, ctis.SourceRef{System: sourceSystem, ID: "plugin:" + pluginID})
+	}
+	if vu := sanitizeIdentifier(r.VulnUUID); vu != "" {
+		f.SourceRefs = append(f.SourceRefs, ctis.SourceRef{System: sourceSystem, ID: "vuln:" + vu})
 	}
 	f.Description = joinNonEmpty("\n\n",
 		sanitizeText(r.Synopsis, capLongText), sanitizeText(r.Description, capLongText))
 	if len(f.Description) > capLongText {
 		f.Description = sanitizeText(f.Description, capLongText)
 	}
-	f.Evidence = sanitizeText(r.PluginText, capEvidence)
+	if ev := sanitizeText(r.PluginText, capEvidence); ev != "" {
+		f.EvidenceItems = []ctis.EvidenceItem{{Kind: ctis.EvidenceKindRawText, Version: 1, Label: "plugin output", Text: ev}}
+	}
 	if port > 0 {
-		f.Network = &ctis.NetworkLocation{Host: h.asset.Value, Port: port, Protocol: proto}
+		n := &ctis.NetworkLocation{Host: h.asset.Value, Port: port}
+		if tr := ctis.Transport(proto); tr == ctis.TransportTCP || tr == ctis.TransportUDP || tr == ctis.TransportSCTP {
+			n.Transport = tr
+		}
+		f.Network = n
 	}
 	if t := m.timestamp(r.FirstSeen); t != nil {
 		f.FirstSeenAt = t
@@ -165,60 +290,66 @@ func (m *mapper) finding(r *vulnRow, h hostKey, state string) ctis.Finding {
 	if state == stateMitigated {
 		f.Status = ctis.FindingStatusResolved
 	}
+	if lm := m.timestamp(r.LastMitigated); lm != nil {
+		f.SourceLifecycle = &ctis.SourceLifecycle{LastFixedAt: lm}
+	}
 
 	f.Vulnerability = m.vulnerability(r, p)
+	f.Scores = m.scores(r, p)
 	if sol := sanitizeText(r.Solution, capLongText); sol != "" && !strings.EqualFold(sol, "n/a") {
-		f.Remediation = &ctis.Remediation{Recommendation: sol}
+		rem := &ctis.Remediation{Recommendation: sol}
+		if t := m.date(r.PatchPubDate, pluginInt(p, func(p *plugin) flexInt { return p.PatchPubDate })); t != nil {
+			rem.PatchPublishedAt = t
+			rem.IsFixAvailable = ctis.Bool(true)
+			rem.SolutionType = ctis.SolutionTypeVendorFix
+		}
+		f.Remediation = rem
+	}
+	if f.Remediation == nil {
+		if t := m.date(r.PatchPubDate, pluginInt(p, func(p *plugin) flexInt { return p.PatchPubDate })); t != nil {
+			f.Remediation = &ctis.Remediation{PatchPublishedAt: t, IsFixAvailable: ctis.Bool(true), SolutionType: ctis.SolutionTypeVendorFix}
+		}
 	}
 	seeAlso := r.SeeAlso
 	if seeAlso == "" && p != nil {
 		seeAlso = p.SeeAlso
 	}
 	f.References = references(seeAlso)
+	if bool(r.AcceptRisk) {
+		f.Suppression = &ctis.Suppression{
+			Kind: "risk_accepted", Status: "accepted",
+			Reason: sanitizeText(r.AcceptRiskRuleComment, capComment),
+		}
+	}
 
 	props := ctis.Properties{}
-	setStr(props, "tenable_plugin_id", pluginID)
-	setStr(props, "tenable_plugin_family", family)
 	setStr(props, "tenable_check_type", sanitizeText(r.CheckType, capIdentifier))
 	if p != nil {
 		setStr(props, "tenable_plugin_type", sanitizeText(p.Type, capIdentifier))
 	}
 	m.setDate(props, "tenable_plugin_pub_date", r.PluginPubDate, pluginInt(p, func(p *plugin) flexInt { return p.PluginPubDate }))
-	m.setDate(props, "tenable_patch_pub_date", r.PatchPubDate, pluginInt(p, func(p *plugin) flexInt { return p.PatchPubDate }))
-	m.setDate(props, "tenable_vuln_pub_date", r.VulnPubDate, pluginInt(p, func(p *plugin) flexInt { return p.VulnPubDate }))
 	m.setDate(props, "tenable_plugin_mod_date", r.PluginModDate, pluginInt(p, func(p *plugin) flexInt {
 		if p.PluginModDate != 0 {
 			return p.PluginModDate
 		}
 		return p.ModifiedTime
 	}))
-	frameworks, ease := r.ExploitFrameworks, r.ExploitEase
+	ease := r.ExploitEase
 	if p != nil {
-		frameworks = firstNonEmpty(frameworks, p.ExploitFrameworks)
 		ease = firstNonEmpty(ease, p.ExploitEase)
 	}
-	setStr(props, "tenable_exploit_frameworks", sanitizeText(frameworks, capShort))
 	setStr(props, "tenable_exploit_ease", sanitizeText(ease, capShort))
-	props["tenable_accept_risk"] = bool(r.AcceptRisk)
-	props["tenable_recast_risk"] = bool(r.RecastRisk)
-	setStr(props, "tenable_accept_risk_comment", sanitizeText(r.AcceptRiskRuleComment, capComment))
+	frameworks := r.ExploitFrameworks
+	if p != nil {
+		frameworks = firstNonEmpty(frameworks, p.ExploitFrameworks)
+	}
+	setStr(props, "tenable_exploit_frameworks", sanitizeText(frameworks, capShort))
+	if bool(r.RecastRisk) {
+		props["tenable_recast_risk"] = true
+	}
 	setStr(props, "tenable_recast_risk_comment", sanitizeText(r.RecastRiskRuleComment, capComment))
-	props["tenable_previously_mitigated"] = bool(r.HasBeenMitigated)
-	m.setDate(props, "tenable_last_mitigated", r.LastMitigated, 0)
-	props["tenable_state"] = state
-	setStr(props, "tenable_repository_id", h.repo)
-	setStr(props, "tenable_repository", sanitizeText(r.Repository.Name, capIdentifier))
-	setStr(props, "tenable_vuln_uuid", sanitizeIdentifier(r.VulnUUID))
-	setStr(props, "tenable_host_uuid", h.hostID)
-	if v, ok := clampRange(r.ACRScore, 1, 10); ok {
-		props["tenable_acr"] = v
-	}
-	if v, ok := clampRange(r.AssetExposureScore, 0, 1000); ok {
-		props["tenable_aes"] = v
-	}
-	if v, ok := clampRange(r.CVSSV4BaseScore, 0, 10); ok {
-		props["tenable_cvss_v4_score"] = v
-		setStr(props, "tenable_cvss_v4_vector", sanitizeText(r.CVSSV4Vector, capIdentifier))
+	if bool(r.HasBeenMitigated) {
+		props["tenable_previously_mitigated"] = true
 	}
 	setStr(props, "tenable_risk_factor", sanitizeText(r.RiskFactor, capIdentifier))
 	xrefs := r.XRefs
@@ -227,35 +358,63 @@ func (m *mapper) finding(r *vulnRow, h hostKey, state string) ctis.Finding {
 	}
 	setStr(props, "tenable_xrefs", sanitizeText(xrefs, capShort))
 	setStr(props, "tenable_bid", sanitizeText(r.BID, capShort))
-	f.Properties = props
-	return f
+	if len(props) > 0 {
+		f.Properties = props
+	}
+	return f, ra
 }
 
-func (m *mapper) vulnerability(r *vulnRow, p *plugin) *ctis.VulnerabilityDetails {
-	v := &ctis.VulnerabilityDetails{}
-	if cves := splitCVEs(r.CVE); len(cves) > 0 {
-		v.CVEID = cves[0]
-		v.CVEIDs = cves
-	}
+// scores maps Tenable's numeric ratings to scores[]: CVSS v3 (or v2 when
+// there is no v3) and v4, Tenable's VPR as a vendor score, and EPSS.
+func (m *mapper) scores(r *vulnRow, p *plugin) []ctis.Score {
+	var out []ctis.Score
+	f64 := func(v float64) *float64 { return &v }
 	if s, ok := clampRange(r.CVSSV3BaseScore, 0, 10); ok {
-		v.CVSSScore, v.CVSSVersion = s, "3.x"
-		v.CVSSVector = sanitizeText(r.CVSSV3Vector, capIdentifier)
+		// The minor version comes from the vector; Tenable does not state it
+		// otherwise.
+		ver := "3.1"
+		if ctis.CVSSVersionOfVector(sanitizeText(r.CVSSV3Vector, capIdentifier)) == "3.0" {
+			ver = "3.0"
+		}
+		out = append(out, ctis.Score{System: ctis.ScoreSystemCVSS, Version: ver, Vector: cvssVector(r.CVSSV3Vector, ver), Value: f64(s), Source: "tenable"})
 	} else if s, ok := clampRange(r.BaseScore, 0, 10); ok {
-		v.CVSSScore, v.CVSSVersion = s, "2.0"
-		v.CVSSVector = sanitizeText(r.CVSSVector, capIdentifier)
+		out = append(out, ctis.Score{System: ctis.ScoreSystemCVSS, Version: "2.0", Vector: cvssVector(r.CVSSVector, "2.0"), Value: f64(s), Source: "tenable"})
+	}
+	if s, ok := clampRange(r.CVSSV4BaseScore, 0, 10); ok {
+		out = append(out, ctis.Score{System: ctis.ScoreSystemCVSS, Version: "4.0", Vector: cvssVector(r.CVSSV4Vector, "4.0"), Value: f64(s), Source: "tenable"})
 	}
 	vpr := r.VPRScore
 	if !vpr.Set && p != nil {
 		vpr = p.VPRScore
 	}
 	if s, ok := clampRange(vpr, 0, 10); ok {
-		v.VPRScore = s
+		out = append(out, ctis.Score{System: ctis.ScoreSystemVendor, Label: "vpr", Value: f64(s), Source: "tenable"})
 	}
-	v.ExploitAvailable = bool(r.ExploitAvailable) || (p != nil && bool(p.ExploitAvailable))
 	if p != nil {
 		if e, ok := epss(p.EPSSScore); ok {
-			v.EPSSScore = e
+			out = append(out, ctis.Score{System: ctis.ScoreSystemEPSS, Value: f64(e), Source: "tenable"})
 		}
+	}
+	return out
+}
+
+// cvssVector keeps a vector only when it belongs to the stated CVSS
+// version (the score would otherwise be rejected).
+func cvssVector(vec, version string) string {
+	vec = sanitizeText(vec, capIdentifier)
+	if vec == "" {
+		return ""
+	}
+	if got := ctis.CVSSVersionOfVector(vec); got != version && (got != "" || version != "2.0") {
+		return ""
+	}
+	return vec
+}
+
+func (m *mapper) vulnerability(r *vulnRow, p *plugin) *ctis.VulnerabilityDetails {
+	v := &ctis.VulnerabilityDetails{}
+	for _, c := range splitCVEs(r.CVE) {
+		v.AddID(c, "tenable")
 	}
 	cpe := r.CPE
 	if cpe == "" && p != nil {
@@ -269,11 +428,25 @@ func (m *mapper) vulnerability(r *vulnRow, p *plugin) *ctis.VulnerabilityDetails
 		pub = p.VulnPubDate
 	}
 	v.PublishedAt = m.timestamp(pub)
-	if v.CVEID == "" && v.CVSSScore == 0 && v.VPRScore == 0 && v.CPE == "" && !v.ExploitAvailable &&
-		v.EPSSScore == 0 && v.PublishedAt == nil {
+	if bool(r.ExploitAvailable) || (p != nil && bool(p.ExploitAvailable)) {
+		v.ThreatSignals = append(v.ThreatSignals, ctis.ThreatSignal{
+			Type: ctis.ThreatSignalPublicExploit, Source: "tenable", AsOf: ptr(m.now),
+		})
+	}
+	if len(v.IDs) == 0 && v.CPE == "" && len(v.ThreatSignals) == 0 && v.PublishedAt == nil {
 		return nil
 	}
 	return v
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// date reads a Tenable epoch date, falling back to the plugin's.
+func (m *mapper) date(v, fallback flexInt) *time.Time {
+	if t := m.timestamp(v); t != nil {
+		return t
+	}
+	return m.timestamp(fallback)
 }
 
 func pluginInt(p *plugin, get func(*plugin) flexInt) flexInt {

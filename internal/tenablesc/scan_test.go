@@ -177,7 +177,7 @@ func TestScan_HappyPath(t *testing.T) {
 	}
 	qs, _ := f.recorded()
 	for _, q := range qs {
-		if q.SourceType != "individual" || q.ScanID != "777" || q.View != "all" {
+		if q.DataSource != "individual" || q.ScanID != "777" || q.View != "all" {
 			t.Fatalf("query not scoped to the scan result: %+v", q)
 		}
 	}

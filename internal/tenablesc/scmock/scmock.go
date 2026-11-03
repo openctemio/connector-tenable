@@ -498,7 +498,7 @@ func (s *Server) stop(w http.ResponseWriter, id string) {
 
 type analysisBody struct {
 	Type       string `json:"type"`
-	SourceType string `json:"sourceType"`
+	DataSource string `json:"sourceType"`
 	ScanID     string `json:"scanID"`
 	Query      struct {
 		Tool        string `json:"tool"`
@@ -520,7 +520,7 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	}
 	var ips []string
 	repoOf := map[string]int{}
-	switch q.SourceType {
+	switch q.DataSource {
 	case "individual":
 		res, ok := s.results[q.ScanID]
 		if !ok {
