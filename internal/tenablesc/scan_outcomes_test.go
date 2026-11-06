@@ -125,8 +125,8 @@ func TestScan_TimedOutTargetsAreUnfinished(t *testing.T) {
 func TestScan_ImportBlockedByLicenceFails(t *testing.T) {
 	_, sim, e, p := newScanFixture(t, running, map[string]string{"status": "Completed", "import": "Blocked"})
 	_, err := e.Execute(context.Background(), scanCmd(t, scanPayload()))
-	if !errors.Is(err, ErrImportRefused) {
-		t.Fatalf("err %v, want ErrImportRefused", err)
+	if !errors.Is(err, ErrImportBlocked) || !strings.Contains(err.Error(), "IMPORT_BLOCKED") || !strings.Contains(err.Error(), "scan_result_id=777") {
+		t.Fatalf("err %v, want ErrImportBlocked with the scan result id", err)
 	}
 	if !strings.Contains(err.Error(), "licence") || !strings.Contains(err.Error(), "licensed 2048, active 1530") {
 		t.Fatalf("error does not explain the licence: %v", err)
@@ -190,7 +190,7 @@ func TestScan_NothingToResumeLaunchesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sim.created) != 1 || len(sim.launches) != 1 || res.Metadata["resumed"] != false || sim.lookups != 2 {
+	if len(sim.created) != 1 || len(sim.launches) != 1 || res.Metadata["resumed"] != false || sim.lookups != 3 {
 		t.Fatalf("created %d launches %v lookups %d md %v", len(sim.created), sim.launches, sim.lookups, res.Metadata)
 	}
 }

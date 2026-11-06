@@ -29,7 +29,7 @@ func recycleEstate(t *testing.T, licensed int, name string) (*scmock.Server, *Sc
 	}, func(in *Instance) {
 		in.Allow.Operations[OperationRecycle] = true
 		in.Allow.ScanRepositories = []int{5, 7}
-		in.Recycle = &Recycle{RepositoryName: name, AdminAccessKey: Secret{testAdminAccess}, AdminSecretKey: Secret{testAdminSecret}}
+		in.Recycle = &Recycle{RepositoryNames: [2]string{name, name + "-b"}, AdminAccessKey: Secret{testAdminAccess}, AdminSecretKey: Secret{testAdminSecret}}
 	})
 	return mock, e
 }
@@ -107,7 +107,7 @@ func TestRecycle_Refusals(t *testing.T) {
 		if _, err := run(t, e, "c0", rotationPayload("0", false, "10.30.0.1")); err == nil {
 			t.Fatal("scanned into a repository that does not exist")
 		}
-		if _, err := run(t, e, "c1", rotationPayload("1", true, "10.30.0.1")); err == nil || !strings.Contains(err.Error(), "no repository is named") {
+		if _, err := run(t, e, "c1", rotationPayload("1", true, "10.30.0.1")); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "neither") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -115,8 +115,11 @@ func TestRecycle_Refusals(t *testing.T) {
 		_, e := recycleEstate(t, 10, "openctem-rotation")
 		e.Config.Instances[0].Recycle.AdminAccessKey = Secret{testAccessKey}
 		e.Config.Instances[0].Recycle.AdminSecretKey = Secret{testSecretKey}
-		if _, err := run(t, e, "c", rotationPayload("1", true, "10.30.0.1")); !errors.Is(err, ErrForbidden) {
-			t.Fatalf("err %v, want the 403 of a non-administrator", err)
+		// A user session lists no organizations: the recycle stops before
+		// anything is created or deleted.
+		if _, err := run(t, e, "c", rotationPayload("1", true, "10.30.0.1")); !errors.Is(err, ErrRefused) ||
+			!strings.Contains(err.Error(), "nothing was created or deleted") {
+			t.Fatalf("err %v, want a refusal before any change", err)
 		}
 	})
 }
@@ -137,14 +140,14 @@ func TestRecycleConfig(t *testing.T) {
 		allow Allow
 		ok    bool
 	}{
-		"valid":                {&fileRecycle{RepositoryName: "openctem-rotation", AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, true},
+		"valid":                {&fileRecycle{RepositoryNames: []string{"openctem-rot-a", "openctem-rot-b"}, AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, true},
 		"no block, no op":      {nil, Allow{Operations: map[string]bool{OperationScan: true}}, true},
 		"op without block":     {nil, scanAllow, false},
-		"block without op":     {&fileRecycle{RepositoryName: "openctem-rotation", AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, Allow{Operations: map[string]bool{OperationScan: true}}, false},
-		"recycle without scan": {&fileRecycle{RepositoryName: "openctem-rotation", AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, Allow{Operations: map[string]bool{OperationRecycle: true}}, false},
-		"name without prefix":  {&fileRecycle{RepositoryName: "Datacenter", AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, false},
-		"prefix only":          {&fileRecycle{RepositoryName: "openctem-", AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, false},
-		"no key files":         {&fileRecycle{RepositoryName: "openctem-rotation"}, scanAllow, false},
+		"block without op":     {&fileRecycle{RepositoryNames: []string{"openctem-rot-a", "openctem-rot-b"}, AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, Allow{Operations: map[string]bool{OperationScan: true}}, false},
+		"recycle without scan": {&fileRecycle{RepositoryNames: []string{"openctem-rot-a", "openctem-rot-b"}, AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, Allow{Operations: map[string]bool{OperationRecycle: true}}, false},
+		"name without prefix":  {&fileRecycle{RepositoryNames: []string{"openctem-rot-a", "Datacenter"}, AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, false},
+		"prefix only":          {&fileRecycle{RepositoryNames: []string{"openctem-", "openctem-rot-b"}, AdminAccessKeyFile: ak, AdminSecretKeyFile: sk}, scanAllow, false},
+		"no key files":         {&fileRecycle{RepositoryNames: []string{"openctem-rot-a", "openctem-rot-b"}}, scanAllow, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := buildRecycle(tc.fr, tc.allow)

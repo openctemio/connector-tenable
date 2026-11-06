@@ -27,13 +27,18 @@ import (
 
 // Errors a caller can tell apart. None of them carries a credential.
 var (
-	ErrCredentialsRejected = errors.New("tenable.sc rejected the API keys (401)")
-	ErrForbidden           = errors.New("tenable.sc refused the request for this user (403)")
-	ErrResponseTooLarge    = errors.New("tenable.sc response is larger than limits.max_response_bytes")
-	ErrRedirectRefused     = errors.New("tenable.sc answered with a redirect; redirects are refused (the API keys would follow it)")
-	ErrUnsupportedVersion  = errors.New("tenable.sc is older than 5.13, which API key authorization needs")
-	ErrBlockedAddress      = errors.New("tenable.sc address is loopback, link-local, metadata, multicast or unspecified")
-	ErrTooManyRecords      = errors.New("tenable.sc query has more records than limits.max_records")
+	// ErrCredentialsRejected: HTTP 401, or the documented HTTP 400 for API
+	// keys that are invalid, deleted, of a locked user or with key
+	// authentication disabled.
+	ErrCredentialsRejected = errors.New("tenable.sc rejected the API keys")
+	// ErrForbidden: HTTP 403, or the documented HTTP 400 for a user with
+	// insufficient permissions for the request.
+	ErrForbidden          = errors.New("tenable.sc refused the request for this user")
+	ErrResponseTooLarge   = errors.New("tenable.sc response is larger than limits.max_response_bytes")
+	ErrRedirectRefused    = errors.New("tenable.sc answered with a redirect; redirects are refused (the API keys would follow it)")
+	ErrUnsupportedVersion = errors.New("tenable.sc is older than 5.13, which API key authorization needs")
+	ErrBlockedAddress     = errors.New("tenable.sc address is loopback, link-local, metadata, multicast or unspecified")
+	ErrTooManyRecords     = errors.New("tenable.sc query has more records than limits.max_records")
 )
 
 // APIError is an error envelope (error_code != 0).
@@ -210,6 +215,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 		payload = b
 	}
+	return c.doRaw(ctx, method, path, query, payload, "application/json", timeout, out)
+}
+
+// doRaw sends one request with a prepared body of contentType.
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, payload []byte, contentType string,
+	timeout time.Duration, out any) error {
 	u := *c.base
 	u.Path = c.base.Path + "/rest" + path
 	u.RawQuery = query.Encode()
@@ -225,7 +236,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		if err := c.limiter.Wait(ctx); err != nil {
 			return err
 		}
-		retry, err := c.once(ctx, method, target, payload, timeout, out)
+		retry, err := c.once(ctx, method, target, payload, contentType, timeout, out)
 		if err == nil {
 			return nil
 		}
@@ -259,7 +270,8 @@ func (c *Client) backoff(attempt int, last error) time.Duration {
 	return c.jitter(d)
 }
 
-func (c *Client) once(ctx context.Context, method, target string, payload []byte, timeout time.Duration, out any) (retry bool, err error) {
+func (c *Client) once(ctx context.Context, method, target string, payload []byte, contentType string, timeout time.Duration,
+	out any) (retry bool, err error) {
 	if timeout <= 0 {
 		timeout = c.reqTimout
 	}
@@ -276,7 +288,7 @@ func (c *Client) once(ctx context.Context, method, target string, payload []byte
 	req.Header.Set("x-apikey", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -309,6 +321,19 @@ func (c *Client) once(ctx context.Context, method, target string, payload []byte
 			return false, fmt.Errorf("%w: %s", ErrForbidden, msg)
 		}
 		return false, ErrForbidden
+	case resp.StatusCode == http.StatusBadRequest:
+		// API key authorization answers 400 for rejected keys, missing
+		// permissions and key database errors (resubmit), not 401/403.
+		msg := c.errorMessage(resp.Body)
+		switch keyProblem(msg) {
+		case keyDatabase:
+			return true, &retryableStatus{status: resp.StatusCode}
+		case keyForbidden:
+			return false, fmt.Errorf("%w: %s", ErrForbidden, msg)
+		case keyRejected:
+			return false, fmt.Errorf("%w: %s", ErrCredentialsRejected, msg)
+		}
+		return false, &APIError{Status: resp.StatusCode, Code: -1, Msg: msg}
 	case resp.StatusCode == http.StatusTooManyRequests,
 		resp.StatusCode == http.StatusBadGateway,
 		resp.StatusCode == http.StatusServiceUnavailable,
@@ -341,6 +366,41 @@ func (c *Client) once(ctx context.Context, method, target string, payload []byte
 		}
 	}
 	return false, nil
+}
+
+// Kinds of HTTP 400 answers to API key authorization.
+const (
+	keyOther = iota
+	keyRejected
+	keyForbidden
+	keyDatabase
+)
+
+// keyProblem classifies an HTTP 400 error message. The API key
+// authorization guide documents 400 for both a token and keys, disabled key
+// authorization, invalid or deleted keys, a locked user, insufficient
+// permissions and key database errors, but not the message texts, so the
+// words are matched loosely; anything else stays an APIError.
+func keyProblem(msg string) int {
+	m := strings.ToLower(msg)
+	has := func(words ...string) bool {
+		for _, w := range words {
+			if strings.Contains(m, w) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("database") && has("key"):
+		return keyDatabase
+	case has("permission", "privilege", "not authorized", "unauthorized"):
+		return keyForbidden
+	case has("api key", "apikey", "access key", "secret key", "authentication", "credential", "invalid login"),
+		has("locked") && has("user"):
+		return keyRejected
+	}
+	return keyOther
 }
 
 func (c *Client) errorMessage(r io.Reader) string {
@@ -408,6 +468,8 @@ type License struct {
 	Status      string
 	LicensedIPs int64
 	ActiveIPs   int64
+	// Source is the endpoint the numbers came from: "v1/license" or "status".
+	Source string
 }
 
 // Status reads the license counters.
@@ -421,7 +483,7 @@ func (c *Client) Status(ctx context.Context) (License, error) {
 	if err := c.do(ctx, http.MethodGet, "/status", q, nil, 0, &r); err != nil {
 		return License{}, err
 	}
-	l := License{Status: sanitizeText(r.LicenseStatus, 32)}
+	l := License{Status: sanitizeText(r.LicenseStatus, 32), Source: "status"}
 	if r.LicensedIPs > 0 {
 		l.LicensedIPs = int64(r.LicensedIPs)
 	}
@@ -520,7 +582,7 @@ func (c *Client) CreateScan(ctx context.Context, s ScanSpec) (string, error) {
 		"repository":    map[string]string{"id": strconv.Itoa(s.RepositoryID)},
 		"ipList":        strings.Join(s.Targets, ","),
 		"schedule":      map[string]string{"type": "template"},
-		"maxScanTime":   strconv.Itoa(s.MaxScanTime),
+		"maxScanTime":   maxScanHours(s.MaxScanTime),
 		"timeoutAction": "import",
 		"dhcpTracking":  "false",
 		"emailOnLaunch": "false",
@@ -540,6 +602,16 @@ func (c *Client) CreateScan(ctx context.Context, s ScanSpec) (string, error) {
 		return "", errors.New("tenable.sc created a scan without a usable id")
 	}
 	return id, nil
+}
+
+// maxScanHours is maxScanTime as the API takes it: whole hours, rounded up,
+// at least 1. The API reference gives no unit; the user guide names the
+// setting "Max scan duration (hours)" and Tenable's pyTenable client sends
+// hours. The connector's own stop (max_scan_seconds plus the import grace)
+// still bounds the run.
+func maxScanHours(seconds int) string {
+	h := (max(seconds, 0) + 3599) / 3600
+	return strconv.Itoa(max(h, 1))
 }
 
 // LaunchScan launches the scan definition id and returns the scan result id.
@@ -573,6 +645,9 @@ type ScanResultState struct {
 	// as progress only (their exact meaning is the product's).
 	TotalIPs     int64
 	CompletedIPs int64
+	// Name and RepositoryID identify the result (a re-import checks them).
+	Name         string
+	RepositoryID string
 }
 
 // ScanResult reads the state of scan result id.
@@ -588,8 +663,10 @@ func (c *Client) ScanResult(ctx context.Context, id string) (ScanResultState, er
 		CompletedChecks flexInt  `json:"completedChecks"`
 		TotalIPs        flexInt  `json:"totalIPs"`
 		CompletedIPs    flexInt  `json:"completedIPs"`
+		Name            string   `json:"name"`
+		Repository      namedRef `json:"repository"`
 	}
-	q := url.Values{"fields": {"id,status,importStatus,running,totalChecks,completedChecks,totalIPs,completedIPs"}}
+	q := url.Values{"fields": {"id,name,repository,status,importStatus,running,totalChecks,completedChecks,totalIPs,completedIPs"}}
 	if err := c.do(ctx, http.MethodGet, "/scanResult/"+id, q, nil, 0, &r); err != nil {
 		return ScanResultState{}, err
 	}
@@ -601,6 +678,8 @@ func (c *Client) ScanResult(ctx context.Context, id string) (ScanResultState, er
 		CompletedChecks: int64(r.CompletedChecks),
 		TotalIPs:        int64(r.TotalIPs),
 		CompletedIPs:    int64(r.CompletedIPs),
+		Name:            sanitizeText(r.Name, 256),
+		RepositoryID:    numericID(string(r.Repository.ID)),
 	}, nil
 }
 
@@ -664,6 +743,41 @@ func (c *Client) findOwn(ctx context.Context, path, fields, name string) ([]OwnS
 		bi, _ := strconv.ParseInt(b.ID, 10, 64)
 		return cmp.Compare(bi, ai)
 	})
+	return out, nil
+}
+
+// FindRollovers returns the scan definitions with a rollover schedule
+// whose name contains name: the rollover scans Tenable.sc creates when a
+// scan reaches its maximum duration. The rollover scan's exact name is not
+// documented; the connector's names are unique per command.
+func (c *Client) FindRollovers(ctx context.Context, name string) ([]string, error) {
+	type row struct {
+		ID       flexString `json:"id"`
+		Name     string     `json:"name"`
+		Schedule struct {
+			Type string `json:"type"`
+		} `json:"schedule"`
+	}
+	var r struct {
+		Usable     []row `json:"usable"`
+		Manageable []row `json:"manageable"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/scan", url.Values{"filter": {"usable,manageable"}, "fields": {"id,name,schedule"}}, nil, 0, &r); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i, it := range append(r.Usable, r.Manageable...) {
+		if i >= maxOwnScanLookup {
+			break
+		}
+		id := numericID(string(it.ID))
+		if id == "" || seen[id] || !strings.EqualFold(it.Schedule.Type, "rollover") || !strings.Contains(it.Name, name) {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
 	return out, nil
 }
 

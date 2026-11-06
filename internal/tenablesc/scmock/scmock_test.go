@@ -3,6 +3,7 @@ package scmock
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,7 +37,7 @@ func TestMock_AuthLicenceAndRepositoryDelete(t *testing.T) {
 	})
 	h := m.Handler()
 	key := "accesskey=a; secretkey=s;"
-	if code, _ := call(t, h, "accesskey=a; secretkey=x;", "GET", "/rest/status", nil); code != 401 {
+	if code, _ := call(t, h, "accesskey=a; secretkey=x;", "GET", "/rest/status", nil); code != 400 {
 		t.Fatalf("wrong key: %d", code)
 	}
 	scan := func(ipList string) string {
@@ -86,5 +87,42 @@ func TestMock_PartialScans(t *testing.T) {
 		"query": map[string]any{"tool": "sumip", "startOffset": 0, "endOffset": 50}})
 	if got := env["response"].(map[string]any)["totalRecords"]; got != "1" {
 		t.Fatalf("hosts in a partial result %v, want the first half", got)
+	}
+}
+
+// The knowledge base behaviour: an empty result imported with a TARGET
+// list removes those addresses, except in an agent repository.
+func TestMock_PurgeImport(t *testing.T) {
+	m := New(Options{AccessKey: "a", SecretKey: "s", LicensedIPs: 10, RunningReads: 1,
+		Repositories:      []Named{{ID: 5, Name: "rot"}, {ID: 6, Name: "agents"}},
+		RepositoryFormats: map[int]string{6: "agent"},
+		Hosts:             []Host{{IP: "10.0.0.1", Alive: true, Vulns: []Vuln{{PluginID: "1000", Severity: 2}}}}})
+	m.data[5]["10.0.0.1"], m.data[6]["10.0.0.1"] = true, true
+	h := m.Handler()
+	key := "accesskey=a; secretkey=s;"
+	upload := func() string {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		fw, _ := mw.CreateFormFile("Filedata", "p.nessus")
+		_, _ = fw.Write([]byte(`<NessusClientData_v2><Policy><Preferences><ServerPreferences><preference><name>TARGET</name>` +
+			`<value>10.0.0.0/30</value></preference></ServerPreferences></Preferences></Policy><Report name="p"></Report></NessusClientData_v2>`))
+		_ = mw.Close()
+		req := httptest.NewRequest("POST", "/rest/file/upload", &buf)
+		req.Header.Set("x-apikey", key)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var env map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &env)
+		return env["response"].(map[string]any)["filename"].(string)
+	}
+	for _, repo := range []string{"6", "5"} {
+		if code, _ := call(t, h, key, "POST", "/rest/scanResult/import", map[string]any{"filename": upload(),
+			"repository": map[string]string{"id": repo}}); code != 200 {
+			t.Fatalf("import into %s: %d", repo, code)
+		}
+	}
+	if m.RepositoryHolds(5, "10.0.0.1") || !m.RepositoryHolds(6, "10.0.0.1") {
+		t.Fatal("purge removed the wrong data")
 	}
 }

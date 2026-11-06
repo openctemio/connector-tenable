@@ -166,7 +166,7 @@ func TestScan_HappyPath(t *testing.T) {
 			t.Fatalf("%s = %v, want id %s", k, body[k], want)
 		}
 	}
-	if body["maxScanTime"] != "1800" {
+	if body["maxScanTime"] != "1" { // 1800 s, in whole hours rounded up
 		t.Fatalf("maxScanTime %v", body["maxScanTime"])
 	}
 	if len(sim.launches) != 1 || sim.polls != 3 || len(sim.stops) != 0 {
@@ -228,8 +228,8 @@ func TestScan_ZoneOmittedWhenZero(t *testing.T) {
 	if _, ok := sim.created[0]["zone"]; ok {
 		t.Fatal("zone sent although the job names none")
 	}
-	if sim.created[0]["maxScanTime"] != "3600" {
-		t.Fatalf("max scan time %v, want the config maximum", sim.created[0]["maxScanTime"])
+	if sim.created[0]["maxScanTime"] != "1" {
+		t.Fatalf("max scan time %v, want the config maximum (3600 s = 1 h)", sim.created[0]["maxScanTime"])
 	}
 }
 
@@ -374,7 +374,7 @@ func TestScan_Admission(t *testing.T) {
 		if _, err := e.Execute(context.Background(), scanCmd(t, p)); err != nil {
 			t.Fatal(err)
 		}
-		if sim.created[0]["maxScanTime"] != "3600" {
+		if sim.created[0]["maxScanTime"] != "1" {
 			t.Fatalf("maxScanTime %v", sim.created[0]["maxScanTime"])
 		}
 	})

@@ -143,12 +143,19 @@ func TestSync_EndToEnd(t *testing.T) {
 	}
 
 	// The queries: repository and severity filters, the incremental windows.
+	// One query per repository, in the documented {"id": N} form.
 	qs, _ := f.recorded()
 	var sawLastSeen, sawLastMitigated bool
+	perRepo := map[string]int{}
 	for _, q := range qs {
 		raw, _ := json.Marshal(q.Query.Filters)
-		if !strings.Contains(string(raw), `"repository"`) || !strings.Contains(string(raw), `{"id":"5"},{"id":"7"}`) {
-			t.Fatalf("query without the repository filter: %s", raw)
+		switch {
+		case strings.Contains(string(raw), `{"filterName":"repository","operator":"=","value":{"id":"5"}}`):
+			perRepo["5"]++
+		case strings.Contains(string(raw), `{"filterName":"repository","operator":"=","value":{"id":"7"}}`):
+			perRepo["7"]++
+		default:
+			t.Fatalf("query without the documented repository filter: %s", raw)
 		}
 		if strings.Contains(string(raw), `"lastSeen","operator":"=","value":"0:3"`) {
 			sawLastSeen = true
@@ -159,6 +166,9 @@ func TestSync_EndToEnd(t *testing.T) {
 	}
 	if !sawLastSeen || !sawLastMitigated {
 		t.Fatal("incremental windows not applied")
+	}
+	if perRepo["5"] == 0 || perRepo["5"] != perRepo["7"] {
+		t.Fatalf("queries per repository %v", perRepo)
 	}
 }
 
@@ -297,9 +307,11 @@ func TestSync_Admission(t *testing.T) {
 			t.Fatal(err)
 		}
 		qs, _ := f2.recorded()
-		raw, _ := json.Marshal(qs[0].Query.Filters)
-		if !strings.Contains(string(raw), `[{"id":"7"}]`) {
-			t.Fatalf("repositories not narrowed: %s", raw)
+		for _, q := range qs {
+			raw, _ := json.Marshal(q.Query.Filters)
+			if !strings.Contains(string(raw), `"value":{"id":"7"}`) {
+				t.Fatalf("repositories not narrowed: %s", raw)
+			}
 		}
 	})
 }
