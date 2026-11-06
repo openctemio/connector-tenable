@@ -118,7 +118,7 @@ func TestMock_LicenceBlocksTheNextBatch(t *testing.T) {
 	cmd := scanCmd(t, mockPayload("2", "10.30.1.0/30"))
 	cmd.ID = "cmd-scan-2"
 	_, err := e.Execute(context.Background(), cmd)
-	if !errors.Is(err, ErrImportRefused) {
+	if !errors.Is(err, ErrImportBlocked) {
 		t.Fatalf("err %v, want the licence refusal", err)
 	}
 	if len(p.reports) != pushed {

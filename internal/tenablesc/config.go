@@ -55,9 +55,14 @@ const (
 const (
 	OperationSync = "sync"
 	OperationScan = "scan"
-	// OperationRecycle lets a coverage batch delete and recreate the one
-	// rotation repository named in the recycle block (licence rotation).
+	// OperationRecycle lets a coverage batch replace one of the two
+	// rotation repositories named in the recycle block with the other
+	// (create, verify, then delete the old one; licence rotation).
 	OperationRecycle = "recycle"
+	// OperationPurge lets a coverage batch remove the previous batch's
+	// addresses from the one rotation repository named in the purge block
+	// (an imported empty result; licence rotation, no administrator key).
+	OperationPurge = "purge"
 )
 
 // RecycleRepositoryPrefix: the rotation repository's name must start with
@@ -145,16 +150,27 @@ type Instance struct {
 	SecretKey Secret
 	Allow     Allow
 	Limits    Limits
-	// Recycle is the rotation repository this sensor may delete and
-	// recreate, with the administrator keys used only for that; nil: off.
+	// Recycle is the pair of rotation repositories this sensor may
+	// replace by each other, with the administrator keys used only for
+	// that; nil: off.
 	Recycle *Recycle
+	// Purge is the rotation repository this sensor may purge the previous
+	// batch's addresses from; nil: off.
+	Purge *Purge
 }
 
-// Recycle names the one rotation repository a coverage batch may recycle.
+// Recycle names the two rotation repositories a coverage batch alternates
+// between: at most one holds data; a recycle creates the other from its
+// definition, verifies it and only then deletes the old one.
 type Recycle struct {
+	RepositoryNames [2]string
+	AdminAccessKey  Secret
+	AdminSecretKey  Secret
+}
+
+// Purge names the one rotation repository a coverage batch may purge.
+type Purge struct {
 	RepositoryName string
-	AdminAccessKey Secret
-	AdminSecretKey Secret
 }
 
 // Allow is what the sensor owner lets the platform ask for.
@@ -253,6 +269,7 @@ type fileInstance struct {
 	Allow         fileAllow    `yaml:"allow"`
 	Limits        fileLimits   `yaml:"limits"`
 	Recycle       *fileRecycle `yaml:"recycle"`
+	Purge         *filePurge   `yaml:"purge"`
 }
 
 type fileAllow struct {
@@ -408,22 +425,52 @@ func buildInstanceWithKeys(fi *fileInstance, rawAccess, rawSecret string) (*Inst
 		return nil, nil, fmt.Errorf("%s: recycle: %v", name, err)
 	}
 	in.Recycle = rc
+	pg, err := buildPurge(fi.Purge, allow)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: purge: %v", name, err)
+	}
+	in.Purge = pg
+	if rc != nil && pg != nil {
+		for _, n := range rc.RepositoryNames {
+			if n == pg.RepositoryName {
+				return nil, nil, fmt.Errorf("%s: purge.repository_name must not be one of recycle.repository_names", name)
+			}
+		}
+	}
 	return in, warns, nil
 }
 
 type fileRecycle struct {
-	RepositoryName     string `yaml:"repository_name"`
-	AdminAccessKeyFile string `yaml:"admin_access_key_file"`
-	AdminSecretKeyFile string `yaml:"admin_secret_key_file"`
+	// RepositoryName is the retired single-name form; it is refused with
+	// a message that says what to write instead.
+	RepositoryName     string   `yaml:"repository_name"`
+	RepositoryNames    []string `yaml:"repository_names"`
+	AdminAccessKeyFile string   `yaml:"admin_access_key_file"`
+	AdminSecretKeyFile string   `yaml:"admin_secret_key_file"`
+}
+
+type filePurge struct {
+	RepositoryName string `yaml:"repository_name"`
+}
+
+// rotationName checks one rotation repository name: the OpenCTEM prefix
+// and something after it, so a typo can never name other data.
+func rotationName(field, raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if !strings.HasPrefix(name, RecycleRepositoryPrefix) || len(name) > 128 || len(name) == len(RecycleRepositoryPrefix) {
+		return "", fmt.Errorf("%s must start with %q (a rotation repository OpenCTEM owns)", field, RecycleRepositoryPrefix)
+	}
+	return name, nil
 }
 
 // buildRecycle validates the recycle block: present exactly when the
-// operation is allowed, a rotation repository name with the OpenCTEM
-// prefix, and administrator keys from files (never the environment).
+// operation is allowed, two distinct rotation repository names with the
+// OpenCTEM prefix, and administrator keys from files (never the
+// environment).
 func buildRecycle(fr *fileRecycle, a Allow) (*Recycle, error) {
 	if fr == nil {
 		if a.Operations[OperationRecycle] {
-			return nil, errors.New("operation recycle needs a recycle block (repository_name and administrator key files)")
+			return nil, errors.New("operation recycle needs a recycle block (repository_names and administrator key files)")
 		}
 		return nil, nil
 	}
@@ -433,9 +480,22 @@ func buildRecycle(fr *fileRecycle, a Allow) (*Recycle, error) {
 	if !a.Operations[OperationScan] {
 		return nil, errors.New("operation recycle needs operation scan")
 	}
-	name := strings.TrimSpace(fr.RepositoryName)
-	if !strings.HasPrefix(name, RecycleRepositoryPrefix) || len(name) > 128 || len(name) == len(RecycleRepositoryPrefix) {
-		return nil, fmt.Errorf("repository_name must start with %q (the rotation repository OpenCTEM owns)", RecycleRepositoryPrefix)
+	if fr.RepositoryName != "" {
+		return nil, errors.New("repository_name is replaced by repository_names: two rotation repository names (for example [openctem-rot-a, openctem-rot-b]); create only the first, the connector creates the other when it recycles")
+	}
+	if len(fr.RepositoryNames) != 2 {
+		return nil, errors.New("repository_names must name exactly two rotation repositories")
+	}
+	var names [2]string
+	for i, raw := range fr.RepositoryNames {
+		n, err := rotationName("repository_names", raw)
+		if err != nil {
+			return nil, err
+		}
+		names[i] = n
+	}
+	if names[0] == names[1] {
+		return nil, errors.New("repository_names must be two different names")
 	}
 	if fr.AdminAccessKeyFile == "" || fr.AdminSecretKeyFile == "" {
 		return nil, errors.New("admin_access_key_file and admin_secret_key_file are required")
@@ -448,7 +508,30 @@ func buildRecycle(fr *fileRecycle, a Allow) (*Recycle, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Recycle{RepositoryName: name, AdminAccessKey: Secret{access}, AdminSecretKey: Secret{secret}}, nil
+	return &Recycle{RepositoryNames: names, AdminAccessKey: Secret{access}, AdminSecretKey: Secret{secret}}, nil
+}
+
+// buildPurge validates the purge block: present exactly when the operation
+// is allowed, with scan, and one rotation repository name with the
+// OpenCTEM prefix. It needs no administrator key.
+func buildPurge(fp *filePurge, a Allow) (*Purge, error) {
+	if fp == nil {
+		if a.Operations[OperationPurge] {
+			return nil, errors.New("operation purge needs a purge block (repository_name)")
+		}
+		return nil, nil
+	}
+	if !a.Operations[OperationPurge] {
+		return nil, errors.New("a purge block needs operation purge in allow.operations")
+	}
+	if !a.Operations[OperationScan] {
+		return nil, errors.New("operation purge needs operation scan")
+	}
+	name, err := rotationName("repository_name", fp.RepositoryName)
+	if err != nil {
+		return nil, err
+	}
+	return &Purge{RepositoryName: name}, nil
 }
 
 func parseBaseURL(raw string) (*url.URL, error) {
@@ -502,10 +585,10 @@ func buildAllow(fa fileAllow) (Allow, error) {
 	for _, op := range fa.Operations {
 		op = strings.ToLower(strings.TrimSpace(op))
 		switch op {
-		case OperationSync, OperationScan, OperationRecycle:
+		case OperationSync, OperationScan, OperationRecycle, OperationPurge:
 			a.Operations[op] = true
 		default:
-			return a, fmt.Errorf("unknown operation %q (sync, scan, recycle)", op)
+			return a, fmt.Errorf("unknown operation %q (sync, scan, recycle, purge)", op)
 		}
 	}
 	var err error

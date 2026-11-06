@@ -127,10 +127,21 @@ found"), and `unfinished` otherwise (a partial, stopped or timed-out scan).
 The result also carries the scan's own `total_ips`/`completed_ips` counters.
 
 **Refused imports fail.** When Tenable.sc does not import the result, the
-command fails with the reason instead of completing with no findings: import
-`Blocked` (the import would exceed the IP licence; the error gives the
-licensed and active counts), import `Error`, or scan status `Error` with
-nothing imported.
+command fails with the reason instead of completing with no findings:
+
+- import `Blocked` (the import would exceed the IP licence): the error starts
+  with `IMPORT_BLOCKED`, carries `scan_result_id=<id>` and the licensed and
+  active counts. Nothing was imported. OpenCTEM imports that result again
+  later with `reimport_scan_result_id` (`POST /rest/scanResult/{id}/import`)
+  once the licence guard sees capacity; it does not scan again;
+- import `Error`, or scan status `Error` with nothing imported.
+
+**Scan duration.** `maxScanTime` is sent in whole hours (rounded up, at least
+1): the user guide names the setting "Max scan duration (hours)". The
+connector also stops the scan itself at `max_scan_seconds` plus 30 minutes.
+When a scan reaches Tenable.sc's own limit, Tenable.sc creates a rollover
+scan; the connector deletes every rollover scan whose name contains its
+`openctem-<command id>`.
 
 **Restarts.** A command handed back to the connector after a restart has the
 same id, so the connector first looks for a scan result and a scan definition
@@ -141,51 +152,110 @@ the end as usual. The lookup reads `GET /rest/scanResult` and
 `GET /rest/scan`; when the user may not list them, the connector launches as
 before.
 
-**Licence-aware coverage.** OpenCTEM can rotate a large estate through a
-smaller IP licence in batches (off by default; enabled per connector by an
+**Licence-aware coverage (Beta).** OpenCTEM can rotate a large estate through
+a smaller IP licence in batches (off by default; enabled per connector by an
 organization administrator who confirms the customer's Tenable licence terms
-allow it). Two things on the connector support it:
+allow it). The connector supports it with:
 
 - *Licence guard.* A coverage batch carries `licence_guard {new_addresses,
-  headroom}`. Before creating anything the connector reads `/rest/status` and
-  launches only when `licensedIPs - activeIPs` covers the batch's new
-  addresses (at most the addresses it covers) plus the headroom; otherwise
-  the command fails with `LICENCE_CAPACITY: …` and OpenCTEM tries again
-  later. Without licence numbers the guard refuses. After the import the
-  connector reads the licence again and reports `active_ips` (after) and
-  `active_ips_before`.
-- *Recycling the rotation repository (opt-in).* Tenable.sc has no API that
-  removes selected IPs or vulnerabilities from a repository; deleting a
-  repository removes its data and the licence count updates at once. To
-  allow it, add `recycle` to `allow.operations` and a `recycle` block:
+  headroom}`. Before creating anything the connector reads the licence: on
+  6.9 and later `GET /rest/v1/license` (`status`, `blades.sc.limit`,
+  `blades.sc.used`), because Tenable deprecated the licence fields of
+  `/rest/system` in 6.9.0; before 6.9, or when that read fails,
+  `GET /rest/status`. It launches only when the licence status is `Valid`
+  (`Exceeded`, `Locked` and `Expired` are refused with the status) and
+  `licensed - active` covers the batch's new addresses (at most the
+  addresses it covers) plus the headroom; otherwise the command fails with
+  `LICENCE_CAPACITY: …` and OpenCTEM tries again later. Without licence
+  numbers the guard refuses. The result reports `license_status`,
+  `license_source`, `active_ips` (after) and `active_ips_before`.
+- *Rotation modes.* How capacity comes back between batches:
+
+  | Mode | What frees the licence | Keys on the sensor | Speed | Status |
+  |---|---|---|---|---|
+  | off | nothing | user | one licence's worth | |
+  | aging (recommended) | 1-day lifetimes on a dedicated universal rotation repository, applied at the nightly cleanup | user | about one batch a day | documented |
+  | purge | an imported empty result that removes the previous batch's addresses at once | user (upload and import) | one batch after another | unverified |
+  | recycle | a verified replacement repository, then delete the old one | user plus administrator | one batch after another | unverified |
+
+- *Aging* needs nothing on the connector: the administrator creates a
+  universal repository with an IP range covering the coverage targets, every
+  vulnerability lifetime set to 1 day and group access for the connector
+  user, and picks it as the coverage repository. OpenCTEM waits at least 24
+  hours plus a margin after each batch, because lifetimes apply only at the
+  nightly cleanup.
+- *Purge (opt-in, unverified).* Tenable's knowledge base documents that
+  importing a `.nessus` file with no host results whose `TARGET` preference
+  lists addresses removes those addresses' data from the repository at once.
+  It does not work on agent repositories; in a universal repository it
+  removes every asset sharing the address; removed data cannot be recovered.
+  Add `purge` to `allow.operations` and a `purge` block:
+
+  ```yaml
+      allow:
+        operations: [sync, scan, purge]
+      purge:
+        repository_name: openctem-rotation   # must start with "openctem-"
+  ```
+
+  A batch with `rotation_mode: purge` scans into that repository. With
+  `purge {previous_command_id, targets}` (sent only after the previous
+  batch's results were ingested) the connector first finds the previous
+  batch's scan result (`openctem-<previous command id>`) in that repository,
+  reads the hosts it imported, refuses when any of them is outside the
+  previous batch's targets or the repository is an agent repository, builds
+  the empty file with exactly those addresses (each one an IP address,
+  checked and XML-escaped), uploads it (`POST /rest/file/upload`) and imports
+  it (`POST /rest/scanResult/import`) into the rotation repository. It then
+  checks with an analysis query that the addresses are gone and that the
+  licence count dropped; otherwise the command fails with
+  `purge_unverified` and OpenCTEM stalls rotation instead of over-using the
+  licence. The API documents no import field for "remove vulnerabilities
+  from hosts that do not reply", so none is sent. No administrator key.
+- *Recycle (opt-in, unverified).* Tenable.sc has no API that removes chosen
+  hosts from a repository, but deleting a repository removes its data. Add
+  `recycle` to `allow.operations` and a `recycle` block with **two** names:
 
   ```yaml
       allow:
         operations: [sync, scan, recycle]
       recycle:
-        repository_name: openctem-rotation   # must start with "openctem-"
+        repository_names: [openctem-rot-a, openctem-rot-b]  # both start with "openctem-"
         admin_access_key_file: /run/secrets/tenable_sc_admin_access_key
         admin_secret_key_file: /run/secrets/tenable_sc_admin_secret_key
   ```
 
-  A batch with `rotation_repository: true` scans into the repository of that
-  name (its id changes each time it is recycled, so it is found by name); with
-  `recycle_repository: true` the connector first deletes it and recreates it
-  with the same definition (description, data format, IP range, lifetimes,
-  organizations) using the administrator keys, which are used for nothing
-  else. OpenCTEM asks for recycling only after the previous batch's results
-  were ingested. No other repository is ever deleted. The repository fields
-  sent back on create follow the API reference and are not yet verified
-  against a real Tenable.sc: try it on a test instance first. The default,
-  aging, needs none of this: give the rotation repository 1-day vulnerability
-  lifetimes and Tenable.sc's nightly cleanup frees the licence.
+  The administrator creates the first one; at most one of the two holds
+  data. With `recycle_repository: true` the connector, with the
+  administrator keys: reads the current repository (`typeFields`: IP range
+  and lifetimes; `organizations` with `groupAssign`); creates the other name
+  from it as a `universal` repository (since 6.8 a new Local repository may
+  only be mobile or universal; `trendingDays` is sent only before 6.9); reads
+  it back and checks that it is universal with the same IP range, lifetimes
+  and group access, that the range covers the batch and that the scanning
+  user can see it; and only then deletes the old one. Any failure stops the
+  batch with the reason and deletes nothing. If both repositories exist (an
+  earlier recycle stopped), the newer one is checked again and the older one
+  deleted only when it passes. The replacement does not copy Tenable One
+  sync settings, `nessusSchedule` or `correlation`, and its id and uuid
+  change, so keep the rotation repositories out of dashboards, reports and
+  accept-risk rules. The single `repository_name` form is no longer
+  accepted.
+
+The data removal steps follow the API reference and Tenable's knowledge base
+and are not yet verified against a real Tenable.sc: try them on a test
+instance first.
 
 **Mock for tests.** `cmd/tenablesc-mock` serves a small Tenable.sc API mock
 (`internal/connector/tenablesc/scmock`) built from the documented shapes:
 scans moving through Queued, Running and Completed, imports finishing or
-`Blocked` by the licence, dead hosts, the licence counted by unique addresses
-holding a non-discovery plugin, repository deletion, and an optional mode where
-every scan ends `Partial` with half its addresses scanned. It is for scratch
+`Blocked` by the licence (and imported again), dead hosts, the licence
+counted by unique addresses holding a non-discovery plugin, repositories in
+the documented shape (`typeFields`, `organizations[].groupAssign` for an
+administrator, the 6.8 create restriction), HTTP 400 for rejected keys and
+missing permissions, `/rest/v1/license` from 6.9, the purge import of an
+empty `.nessus`, rollover scans at the maximum duration, and an optional mode
+where every scan ends `Partial` with half its addresses scanned. It is for scratch
 end-to-end runs only and is not in the connector image.
 
 `connector_sync` also reports a catalog of the repositories, scan
@@ -202,6 +272,20 @@ add only the right to create scans, share with it only the policies in
 zones in `scan_zones`; without scan launch, give it no scan rights. Generate its API keys (Tenable.sc 5.13 or later, with API key
 authentication enabled under System Configuration) and store them in the key
 files, owned by root and readable only by the connector's user.
+
+For rotation: with aging or purge the same user needs group access to the
+rotation repository (purge also uploads and imports a file into it). Recycle
+needs a second key pair from a Tenable.sc **Administrator**, used only to
+read, create and delete the two rotation repositories (administrators manage
+repositories but cannot read vulnerability data, so the split is required).
+Error answers for rejected keys and missing permissions are HTTP 400 on
+Tenable.sc; the connector reports them as rejected keys or forbidden.
+
+Every query names one repository in the documented filter form
+(`{"id": N}`), and every row whose repository is not the queried one is
+dropped and counted (`skipped.other_repository`): the API reference says
+filter operators are not validated, so the connector never relies on the
+filter alone.
 
 ## What is sent to OpenCTEM
 

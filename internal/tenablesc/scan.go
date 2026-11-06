@@ -55,12 +55,19 @@ type ScanPayload struct {
 	// has the IP licence capacity the batch needs (licence-aware coverage).
 	LicenceGuard *LicenceGuard `json:"licence_guard,omitempty"`
 	// RotationRepository: scan into the instance's rotation repository
-	// (found by the name in the recycle block, its id changes when it is
-	// recycled) instead of repository_id. RecycleRepository: delete and
-	// recreate it first (the platform sets it only after the previous
-	// batch's results were ingested).
-	RotationRepository bool `json:"rotation_repository,omitempty"`
-	RecycleRepository  bool `json:"recycle_repository,omitempty"`
+	// (found by a name in the recycle or purge block) instead of
+	// repository_id. RotationMode says which block: recycle (the default)
+	// or purge. RecycleRepository: replace it by the other recycle
+	// repository first; Purge: remove the previous batch's addresses from
+	// it first (the platform sets either only after the previous batch's
+	// results were ingested).
+	RotationRepository bool          `json:"rotation_repository,omitempty"`
+	RotationMode       string        `json:"rotation_mode,omitempty"`
+	RecycleRepository  bool          `json:"recycle_repository,omitempty"`
+	Purge              *PurgeRequest `json:"purge,omitempty"`
+	// ReimportScanResultID: instead of scanning, import again this
+	// OpenCTEM scan result whose import was Blocked by the licence.
+	ReimportScanResultID int `json:"reimport_scan_result_id,omitempty"`
 
 	// Platform bookkeeping, ignored here: the run and step keys, and the
 	// per-host politeness keys the platform adds to every scan-like
@@ -91,6 +98,16 @@ var ErrLicenceCapacity = errors.New(LicenceCapacityCode + ": the Tenable.sc lice
 
 // LicenceCapacityCode prefixes a licence-capacity refusal.
 const LicenceCapacityCode = "LICENCE_CAPACITY"
+
+// ImportBlockedCode starts the error of a scan whose import Tenable.sc
+// Blocked: nothing was imported. The error carries scan_result_id=<id>; the
+// platform imports that result again once capacity is free.
+const ImportBlockedCode = "IMPORT_BLOCKED"
+
+// ErrImportBlocked: Tenable.sc scanned but Blocked the import because it
+// would exceed the IP licence (Security Center user guide, "Import
+// Status"); nothing was imported.
+var ErrImportBlocked = errors.New(ImportBlockedCode + ": tenable.sc did not import the scan result, the import would exceed the IP licence; nothing was imported")
 
 // TargetChecker is the sensor-local policy's target check
 // (core.LocalPolicy.CheckTarget).
@@ -133,10 +150,14 @@ func (c *Config) AllowsScans() bool {
 
 type scanJob struct {
 	guard    *LicenceGuard
-	rotation bool // scan into the rotation repository
-	recycle  bool // recycle it first
-	inst     *Instance
-	targets  []string
+	rotation bool   // scan into the rotation repository
+	mode     string // rotation mode: recycle or purge
+	recycle  bool   // recycle it first
+	purge    *purgeJob
+	// reimportID is a Blocked scan result to import again ("" to scan).
+	reimportID string
+	inst       *Instance
+	targets    []string
 	// raw is each normalized target's spelling in the payload: outcomes
 	// name targets as the platform sent them.
 	raw         map[string]string
@@ -194,6 +215,13 @@ func (e *ScanExecutor) logf(format string, args ...any) {
 	}
 }
 
+func (e *ScanExecutor) interval() time.Duration {
+	if e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return defaultPollInterval
+}
+
 func (e *ScanExecutor) wait(ctx context.Context, d time.Duration) error {
 	if e.sleep != nil {
 		return e.sleep(ctx, d)
@@ -227,11 +255,23 @@ func (e *ScanExecutor) admit(ctx context.Context, raw json.RawMessage) (*scanJob
 	if !slices.Contains(a.ScanPolicies, p.PolicyID) {
 		return nil, fmt.Errorf("%w: scan policy %d is not allowed by the sensor owner", ErrRefused, p.PolicyID)
 	}
+	mode := p.RotationMode
+	if mode == "" && p.RotationRepository {
+		mode = OperationRecycle
+	}
 	switch {
-	case p.RecycleRepository && !p.RotationRepository:
-		return nil, fmt.Errorf("%w: recycle_repository needs rotation_repository", ErrRefused)
-	case p.RotationRepository && (inst.Recycle == nil || !a.Operations[OperationRecycle]):
-		return nil, fmt.Errorf("%w: the sensor owner configured no rotation repository to recycle on instance %q", ErrRefused, inst.Name)
+	case !p.RotationRepository && (p.RecycleRepository || p.Purge != nil || p.RotationMode != ""):
+		return nil, fmt.Errorf("%w: recycle_repository, purge and rotation_mode need rotation_repository", ErrRefused)
+	case p.RotationRepository && mode != OperationRecycle && mode != OperationPurge:
+		return nil, fmt.Errorf("%w: rotation_mode must be recycle or purge", ErrRefused)
+	case p.RecycleRepository && mode != OperationRecycle, p.Purge != nil && mode != OperationPurge:
+		return nil, fmt.Errorf("%w: recycle_repository needs rotation_mode recycle and purge needs rotation_mode purge", ErrRefused)
+	case p.ReimportScanResultID != 0 && (p.RecycleRepository || p.Purge != nil):
+		return nil, fmt.Errorf("%w: a re-import never recycles or purges", ErrRefused)
+	case mode == OperationRecycle && (inst.Recycle == nil || !a.Operations[OperationRecycle]):
+		return nil, fmt.Errorf("%w: the sensor owner configured no rotation repositories to recycle on instance %q", ErrRefused, inst.Name)
+	case mode == OperationPurge && (inst.Purge == nil || !a.Operations[OperationPurge]):
+		return nil, fmt.Errorf("%w: the sensor owner configured no rotation repository to purge on instance %q", ErrRefused, inst.Name)
 	case p.RotationRepository:
 		// Resolved by name at run time.
 	case !slices.Contains(a.ScanRepositories, p.RepositoryID):
@@ -240,8 +280,24 @@ func (e *ScanExecutor) admit(ctx context.Context, raw json.RawMessage) (*scanJob
 	if p.ZoneID < 0 || (p.ZoneID > 0 && !slices.Contains(a.ScanZones, p.ZoneID)) {
 		return nil, fmt.Errorf("%w: scan zone %d is not allowed by the sensor owner", ErrRefused, p.ZoneID)
 	}
+	if p.ReimportScanResultID < 0 {
+		return nil, fmt.Errorf("%w: reimport_scan_result_id must be positive", ErrRefused)
+	}
 	job := &scanJob{inst: inst, policyID: p.PolicyID, repoID: p.RepositoryID, zoneID: p.ZoneID,
 		rotation: p.RotationRepository, recycle: p.RecycleRepository}
+	if p.RotationRepository {
+		job.mode = mode
+	}
+	if p.ReimportScanResultID > 0 {
+		job.reimportID = strconv.Itoa(p.ReimportScanResultID)
+	}
+	if p.Purge != nil {
+		pj, err := admitPurge(p.Purge, a)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrRefused, err)
+		}
+		job.purge = pj
+	}
 	if g := p.LicenceGuard; g != nil {
 		if g.NewAddresses < 0 || g.Headroom < 0 {
 			return nil, fmt.Errorf("%w: licence_guard values must not be negative", ErrRefused)
@@ -427,6 +483,13 @@ type scanRun struct {
 	// recycledFrom is the rotation repository id deleted before this
 	// batch ("" when none was recycled).
 	recycledFrom string
+	// purged is how many addresses of the previous batch were purged.
+	purged int
+	// reimported: this run imported a Blocked result again.
+	reimported bool
+	// rollovers is how many rollover scans Tenable.sc created for this
+	// run's scan were deleted.
+	rollovers int
 	// lastChecks is the completed-check count last reported as liveness.
 	lastChecks int64
 	assessed   *assessedHosts
@@ -457,24 +520,37 @@ func (r *scanRun) run() error {
 		return err
 	}
 	r.version = sys.Version
-	if lic, err := r.client.Status(r.ctx); err == nil {
+	if lic, err := r.client.LicenseState(r.ctx, r.version); err == nil {
 		r.license = &lic
 	} else if errors.Is(err, ErrCredentialsRejected) || r.ctx.Err() != nil {
 		return err
 	}
 
-	name := "openctem-" + sanitizeIdentifier(r.cmdID)
-	resumed, err := r.resume(name)
+	repos, prepare, err := r.repositories()
 	if err != nil {
 		return err
 	}
+	name := "openctem-" + sanitizeIdentifier(r.cmdID)
+	var resumed bool
+	if r.job.reimportID != "" {
+		if err := r.reimport(repos); err != nil {
+			return err
+		}
+		resumed = true
+	} else if resumed, err = r.resume(name, repos); err != nil {
+		return err
+	}
 	if !resumed {
-		if r.job.rotation {
-			id, err := r.rotationRepository(r.job.recycle)
+		if prepare != nil {
+			id, err := prepare()
 			if err != nil {
 				return err
 			}
-			r.job.repoID = id
+			n, err := strconv.Atoi(id)
+			if err != nil {
+				return fmt.Errorf("rotation repository id %q: %w", id, err)
+			}
+			r.job.repoID = n
 		}
 		if err := r.checkCapacity(); err != nil {
 			return err
@@ -506,7 +582,7 @@ func (r *scanRun) run() error {
 		// findings, which would read as "assessed, nothing found".
 		switch {
 		case imported == "blocked":
-			return fmt.Errorf("%w %s: the import would exceed the IP licence%s", ErrImportRefused, r.resultID, r.licenceText())
+			return fmt.Errorf("%w (scan_result_id=%s)%s", ErrImportBlocked, r.resultID, r.licenceText())
 		case imported == "error" || imported == "failed":
 			return fmt.Errorf("%w %s (import status %q)", ErrImportRefused, r.resultID, r.state.ImportStatus)
 		case status == "error" || status == "failed":
@@ -525,7 +601,7 @@ func (r *scanRun) run() error {
 		}
 		// The licence count after this batch was imported: what the
 		// platform sizes the next batch against.
-		if lic, err := r.client.Status(r.ctx); err == nil {
+		if lic, err := r.client.LicenseState(r.ctx, r.version); err == nil {
 			r.licenseAfter = &lic
 		}
 	}
@@ -553,11 +629,15 @@ func (r *scanRun) checkCapacity() error {
 		return nil
 	}
 	if r.license == nil {
-		lic, err := r.client.Status(r.ctx)
+		lic, err := r.client.LicenseState(r.ctx, r.version)
 		if err != nil {
 			return fmt.Errorf("%w (licence status unavailable: %v)", ErrLicenceCapacity, err)
 		}
 		r.license = &lic
+	}
+	if !licenseValid(r.license.Status) {
+		return fmt.Errorf("%w (licence status %q from %s: only a Valid licence is used; Exceeded, Locked and Expired are refused)",
+			ErrLicenceCapacity, r.license.Status, r.license.Source)
 	}
 	need := int64(g.NewAddresses)
 	if need > r.job.addresses {
@@ -580,7 +660,7 @@ var ErrImportRefused = errors.New("tenable.sc did not import scan result")
 func (r *scanRun) licenceText() string {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), cleanupTimeout)
 	defer cancel()
-	if lic, err := r.client.Status(ctx); err == nil {
+	if lic, err := r.client.LicenseState(ctx, r.version); err == nil {
 		r.license = &lic
 	}
 	if r.license == nil {
@@ -608,7 +688,7 @@ func (r *scanRun) launch() error {
 // this command, and a result in the job's repository, are taken. A failed
 // lookup launches as before (the lookup is a safeguard, not a gate), except
 // rejected keys or a cancelled command.
-func (r *scanRun) resume(name string) (bool, error) {
+func (r *scanRun) resume(name string, repos []string) (bool, error) {
 	results, err := r.client.FindScanResults(r.ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrCredentialsRejected) || r.ctx.Err() != nil {
@@ -622,10 +702,12 @@ func (r *scanRun) resume(name string) (bool, error) {
 	} else if err != nil && (errors.Is(err, ErrCredentialsRejected) || r.ctx.Err() != nil) {
 		return false, err
 	}
-	repo := strconv.Itoa(r.job.repoID)
 	for _, res := range results {
-		if res.RepositoryID != "" && res.RepositoryID != repo {
+		if res.RepositoryID != "" && !slices.Contains(repos, res.RepositoryID) {
 			continue
+		}
+		if res.RepositoryID != "" {
+			r.job.repoID, _ = strconv.Atoi(res.RepositoryID)
 		}
 		r.resultID = res.ID
 		r.resumed = true
@@ -639,14 +721,89 @@ func (r *scanRun) resume(name string) (bool, error) {
 	return false, nil
 }
 
+// repositories returns the repositories a result of this job may be in
+// and, for a rotation batch, the step that prepares (recycles or purges)
+// the rotation repository and returns its id.
+func (r *scanRun) repositories() ([]string, func() (string, error), error) {
+	if !r.job.rotation {
+		return []string{strconv.Itoa(r.job.repoID)}, nil, nil
+	}
+	if r.job.mode == OperationPurge {
+		repo, err := r.resolvePurge()
+		if err != nil {
+			return nil, nil, err
+		}
+		return []string{repo.id()}, func() (string, error) {
+			if r.job.purge != nil {
+				if err := r.purgePrevious(repo); err != nil {
+					return "", err
+				}
+			}
+			if err := r.verifyCovers(repo); err != nil {
+				return "", rotationRefusal(repo.Name, err)
+			}
+			return repo.id(), nil
+		}, nil
+	}
+	rs, err := r.resolveRecycle()
+	if err != nil {
+		return nil, nil, err
+	}
+	return rs.ids(), func() (string, error) { return r.prepareRecycle(rs) }, nil
+}
+
+// verifyCovers checks, when the user's session shows the repository's IP
+// range, that it covers the batch (a scan would fail otherwise).
+func (r *scanRun) verifyCovers(d *repositoryDef) error {
+	if strings.TrimSpace(d.TypeFields.IPRange) == "" {
+		return nil // not shown to this user; Tenable.sc checks at scan creation
+	}
+	ranges, err := parseIPRange(d.TypeFields.IPRange)
+	if err != nil {
+		return err
+	}
+	for _, t := range r.job.targets {
+		if !rangesCover(ranges, t) {
+			return fmt.Errorf("its IP range does not cover target %s", t)
+		}
+	}
+	return nil
+}
+
+// reimport imports a Blocked OpenCTEM scan result again once the licence
+// guard sees capacity (POST /rest/scanResult/{id}/import), then follows it
+// like a launched scan. Only a result named by OpenCTEM, in a repository
+// this job may use, is taken; one already importing or imported (a
+// restarted command) is followed without importing again.
+func (r *scanRun) reimport(repos []string) error {
+	st, err := r.client.ScanResult(r.ctx, r.job.reimportID)
+	if err != nil {
+		return fmt.Errorf("scan result %s: %w", r.job.reimportID, err)
+	}
+	if !strings.HasPrefix(st.Name, "openctem-") || st.RepositoryID == "" || !slices.Contains(repos, st.RepositoryID) {
+		return fmt.Errorf("%w: scan result %s is not an OpenCTEM scan result in a repository this job may use", ErrRefused, r.job.reimportID)
+	}
+	r.resultID = r.job.reimportID
+	r.job.repoID, _ = strconv.Atoi(st.RepositoryID)
+	r.reimported = true
+	if !strings.EqualFold(st.ImportStatus, "blocked") {
+		return nil
+	}
+	if err := r.checkCapacity(); err != nil {
+		return err
+	}
+	if err := r.client.ReimportScanResult(r.ctx, r.resultID); err != nil {
+		return fmt.Errorf("re-import scan result %s: %w", r.resultID, err)
+	}
+	r.e.logf("tenable.sc %s: blocked scan result %s imported again", r.job.inst.Name, r.resultID)
+	return nil
+}
+
 // poll waits for the scan result to finish and its import to end. Past the
 // deadline the scan is stopped and the run is partial; a cancelled command
 // stops the scan and fails.
 func (r *scanRun) poll() error {
-	interval := r.e.pollInterval
-	if interval <= 0 {
-		interval = defaultPollInterval
-	}
+	interval := r.e.interval()
 	deadline := r.e.clock().Add(time.Duration(r.job.maxSeconds)*time.Second + importGrace)
 	for {
 		st, err := r.client.ScanResult(r.ctx, r.resultID)
@@ -697,19 +854,40 @@ func (r *scanRun) stop() {
 	r.stopped = true
 }
 
-// cleanup deletes the scan definition this run created (its results stay).
+// cleanup deletes the scan definition this run created (its results stay)
+// and any rollover scan Tenable.sc created for it: when a scan reaches its
+// maximum duration, Tenable.sc creates a rollover scan whatever the timeout
+// action (user guide, "Active Scan Settings").
 func (r *scanRun) cleanup() {
-	if r.defID == "" {
+	if r.defID == "" && r.resultID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), cleanupTimeout)
 	defer cancel()
-	if err := r.client.DeleteScan(ctx, r.defID); err != nil {
-		r.deleteErr = sanitizeText(err.Error(), maxErrorMsgBytes)
-		r.e.logf("tenable.sc %s: deleting scan definition %s failed: %v", r.job.inst.Name, r.defID, err)
+	if r.defID != "" {
+		if err := r.client.DeleteScan(ctx, r.defID); err != nil {
+			r.deleteErr = sanitizeText(err.Error(), maxErrorMsgBytes)
+			r.e.logf("tenable.sc %s: deleting scan definition %s failed: %v", r.job.inst.Name, r.defID, err)
+		} else {
+			r.deleted = true
+		}
+	}
+	name := "openctem-" + sanitizeIdentifier(r.cmdID)
+	ids, err := r.client.FindRollovers(ctx, name)
+	if err != nil {
+		r.e.logf("tenable.sc %s: could not look for rollover scans of %s: %v", r.job.inst.Name, name, err)
 		return
 	}
-	r.deleted = true
+	for _, id := range ids {
+		if id == r.defID {
+			continue
+		}
+		if err := r.client.DeleteScan(ctx, id); err != nil {
+			r.e.logf("tenable.sc %s: deleting rollover scan %s failed: %v", r.job.inst.Name, id, err)
+			continue
+		}
+		r.rollovers++
+	}
 }
 
 // pull reads the scan result's findings and hosts and pushes them.
@@ -729,7 +907,7 @@ func (r *scanRun) pull() error {
 		version:  r.version,
 		assessed: r.assessed,
 	}
-	if err := sr.query(sr.vulnQuery("individual"), stateOpen); err != nil {
+	if err := sr.queries(sr.vulnQueries("individual"), stateOpen); err != nil {
 		return fmt.Errorf("read scan result %s: %w", r.resultID, err)
 	}
 	if err := sr.flush(); err != nil {
@@ -781,6 +959,18 @@ func (r *scanRun) metadata() map[string]any {
 	if r.recycledFrom != "" {
 		md["recycled_repository_id"] = r.recycledFrom
 	}
+	if r.job.rotation {
+		md["rotation_mode"] = r.job.mode
+	}
+	if r.purged > 0 {
+		md["purged_addresses"] = r.purged
+	}
+	if r.reimported {
+		md["reimported"] = true
+	}
+	if r.rollovers > 0 {
+		md["rollover_scans_deleted"] = r.rollovers
+	}
 	if r.state.TotalChecks > 0 {
 		md["completed_checks"] = r.state.CompletedChecks
 		md["total_checks"] = r.state.TotalChecks
@@ -788,6 +978,8 @@ func (r *scanRun) metadata() map[string]any {
 	if r.license != nil {
 		md["licensed_ips"] = r.license.LicensedIPs
 		md["active_ips"] = r.license.ActiveIPs
+		md["license_status"] = r.license.Status
+		md["license_source"] = r.license.Source
 	}
 	if r.licenseAfter != nil {
 		md["licensed_ips"] = r.licenseAfter.LicensedIPs

@@ -221,6 +221,7 @@ func (e *SyncExecutor) admit(raw json.RawMessage) (*syncJob, error) {
 type syncCounts struct {
 	hosts, open, mitigated, plugins, reports int
 	skippedNoAsset, skippedBadRow            int
+	skippedOtherRepository                   int
 	pluginErrors, pluginsSkipped             int
 	ipCollisions                             int
 }
@@ -261,7 +262,7 @@ func (r *syncRun) execute() error {
 		return err
 	}
 	r.version = sys.Version
-	if lic, err := r.client.Status(r.ctx); err == nil {
+	if lic, err := r.client.LicenseState(r.ctx, r.version); err == nil {
 		r.license = &lic
 	} else if errors.Is(err, ErrCredentialsRejected) || r.ctx.Err() != nil {
 		return err
@@ -270,12 +271,12 @@ func (r *syncRun) execute() error {
 	}
 
 	if r.job.include[IncludeVulns] {
-		if err := r.query(r.vulnQuery("cumulative"), stateOpen); err != nil {
+		if err := r.queries(r.vulnQueries("cumulative"), stateOpen); err != nil {
 			return err
 		}
 	}
 	if r.job.include[IncludeMitigated] {
-		if err := r.query(r.vulnQuery("patched"), stateMitigated); err != nil {
+		if err := r.queries(r.vulnQueries("patched"), stateMitigated); err != nil {
 			return err
 		}
 	}
@@ -340,16 +341,34 @@ func (r *syncRun) readCatalog() {
 	r.catalogWarnings = warns
 }
 
-func (r *syncRun) baseFilters(withSeverity bool) []Filter {
-	repos := make([]map[string]string, 0, len(r.job.repositories))
-	for _, id := range r.job.repositories {
-		repos = append(repos, map[string]string{"id": strconv.Itoa(id)})
-	}
-	f := []Filter{{FilterName: "repository", Operator: "=", Value: repos}}
+// repoQuery is one analysis query and the one repository whose rows it may
+// return.
+type repoQuery struct {
+	Query
+	repo string
+}
+
+// baseFilters selects one repository, in the documented form of the
+// repository filter ({"id": N}, one object), so a sync runs one query per
+// allowed repository.
+func (r *syncRun) baseFilters(repo int, withSeverity bool) []Filter {
+	f := []Filter{{FilterName: "repository", Operator: "=", Value: map[string]string{"id": strconv.Itoa(repo)}}}
 	if withSeverity {
 		f = append(f, r.severityFilter())
 	}
 	return f
+}
+
+// rowAllowed is the defence in depth behind the repository filter: the API
+// reference says filter operators are not validated, so every row whose
+// repository is not the one the query asked for (and so maybe not one the
+// sensor owner allowed) is dropped and counted, never pushed.
+func (r *syncRun) rowAllowed(q repoQuery, row *vulnRow) bool {
+	if numericID(string(row.Repository.ID)) == q.repo && q.repo != "" {
+		return true
+	}
+	r.counts.skippedOtherRepository++
+	return false
 }
 
 func (r *syncRun) severityFilter() Filter {
@@ -374,20 +393,46 @@ func (r *syncRun) resultQuery(tool string, withSeverity bool) Query {
 		Filters: f, SortField: sort, SortDir: sortDir}
 }
 
-func (r *syncRun) vulnQuery(sourceType string) Query {
+func (r *syncRun) vulnQueries(sourceType string) []repoQuery {
 	if r.job.scanResultID != "" {
-		return r.resultQuery("vulndetails", true)
+		return []repoQuery{{Query: r.resultQuery("vulndetails", true), repo: r.resultRepo()}}
 	}
-	f := r.baseFilters(true)
-	switch {
-	case sourceType == "patched" && r.job.mode == ModeFull:
-		f = append(f, Filter{FilterName: "lastMitigated", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.mitDays)})
-	case sourceType == "patched":
-		f = append(f, Filter{FilterName: "lastMitigated", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
-	case r.job.mode == ModeIncremental:
-		f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
+	out := make([]repoQuery, 0, len(r.job.repositories))
+	for _, repo := range r.job.repositories {
+		f := r.baseFilters(repo, true)
+		switch {
+		case sourceType == "patched" && r.job.mode == ModeFull:
+			f = append(f, Filter{FilterName: "lastMitigated", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.mitDays)})
+		case sourceType == "patched":
+			f = append(f, Filter{FilterName: "lastMitigated", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
+		case r.job.mode == ModeIncremental:
+			f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
+		}
+		out = append(out, repoQuery{
+			Query: Query{Tool: "vulndetails", DataSource: sourceType, Filters: f, SortField: sortField, SortDir: sortDir},
+			repo:  strconv.Itoa(repo),
+		})
 	}
-	return Query{Tool: "vulndetails", DataSource: sourceType, Filters: f, SortField: sortField, SortDir: sortDir}
+	return out
+}
+
+// resultRepo is the repository a scan result's rows must carry (the one the
+// scan imported into).
+func (r *syncRun) resultRepo() string {
+	if len(r.job.repositories) != 1 {
+		return ""
+	}
+	return strconv.Itoa(r.job.repositories[0])
+}
+
+// queries runs every query of qs.
+func (r *syncRun) queries(qs []repoQuery, state string) error {
+	for _, q := range qs {
+		if err := r.query(q, state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pages runs q page by page. The first page's total is checked against the
@@ -429,8 +474,8 @@ func (r *syncRun) pages(q Query, each func(rows []json.RawMessage) error) error 
 	}
 }
 
-func (r *syncRun) query(q Query, state string) error {
-	return r.pages(q, func(raw []json.RawMessage) error {
+func (r *syncRun) query(q repoQuery, state string) error {
+	return r.pages(q.Query, func(raw []json.RawMessage) error {
 		rows := make([]*vulnRow, 0, len(raw))
 		for _, b := range raw {
 			var row vulnRow
@@ -445,6 +490,9 @@ func (r *syncRun) query(q Query, state string) error {
 			}
 		}
 		for _, row := range rows {
+			if !r.rowAllowed(q, row) {
+				continue
+			}
 			if sanitizeIdentifier(string(row.PluginID)) == "" {
 				r.counts.skippedBadRow++
 				continue
@@ -476,21 +524,38 @@ func (r *syncRun) query(q Query, state string) error {
 
 // hosts adds the hosts with no finding at or above min_severity (sumip).
 func (r *syncRun) hosts() error {
-	var q Query
+	var qs []repoQuery
 	if r.job.scanResultID != "" {
-		q = r.resultQuery("sumip", false)
+		qs = []repoQuery{{Query: r.resultQuery("sumip", false), repo: r.resultRepo()}}
 	} else {
-		f := r.baseFilters(false)
-		if r.job.mode == ModeIncremental {
-			f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
+		for _, repo := range r.job.repositories {
+			f := r.baseFilters(repo, false)
+			if r.job.mode == ModeIncremental {
+				f = append(f, Filter{FilterName: "lastSeen", Operator: "=", Value: fmt.Sprintf("0:%d", r.job.windowDays)})
+			}
+			qs = append(qs, repoQuery{
+				Query: Query{Tool: "sumip", DataSource: "cumulative", Filters: f, SortField: "ip", SortDir: sortDir},
+				repo:  strconv.Itoa(repo),
+			})
 		}
-		q = Query{Tool: "sumip", DataSource: "cumulative", Filters: f, SortField: "ip", SortDir: sortDir}
 	}
-	return r.pages(q, func(raw []json.RawMessage) error {
+	for _, q := range qs {
+		if err := r.hostQuery(q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *syncRun) hostQuery(q repoQuery) error {
+	return r.pages(q.Query, func(raw []json.RawMessage) error {
 		for _, b := range raw {
 			var row vulnRow
 			if err := json.Unmarshal(b, &row); err != nil {
 				return fmt.Errorf("tenable.sc returned an unreadable host row: %w", err)
+			}
+			if !r.rowAllowed(q, &row) {
+				continue
 			}
 			r.assessed.add(row.IP, row.DNSName)
 			h, ok := r.mapper.host(&row)
@@ -700,10 +765,11 @@ func (r *syncRun) metadata(dur time.Duration) map[string]any {
 			"records":   r.records,
 		},
 		"skipped": map[string]int{
-			"no_asset":        r.counts.skippedNoAsset,
-			"bad_row":         r.counts.skippedBadRow,
-			"plugin_errors":   r.counts.pluginErrors,
-			"plugins_skipped": r.counts.pluginsSkipped,
+			"no_asset":         r.counts.skippedNoAsset,
+			"bad_row":          r.counts.skippedBadRow,
+			"other_repository": r.counts.skippedOtherRepository,
+			"plugin_errors":    r.counts.pluginErrors,
+			"plugins_skipped":  r.counts.pluginsSkipped,
 		},
 		// Flat counters the platform reads to update the integration.
 		"hosts":         r.counts.hosts,
