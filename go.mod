@@ -3,8 +3,8 @@ module github.com/openctemio/connector-tenable
 go 1.27.3
 
 require (
-	github.com/openctemio/contract v1.1.1
-	github.com/openctemio/sdk-go v0.46.0
+	github.com/openctemio/contract v1.5.1
+	github.com/openctemio/sdk-go v0.47.4
 	golang.org/x/time v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -20,7 +20,7 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/openctemio/ctis/v2 v2.0.0 // indirect
+	github.com/openctemio/ctis/v2 v2.0.1 // indirect
 	github.com/openctemio/ctis/v2/interop/csaf v0.1.0 // indirect
 	github.com/openctemio/ctis/v2/interop/cyclonedx v0.1.0 // indirect
 	github.com/openctemio/ctis/v2/interop/openvex v0.1.0 // indirect
