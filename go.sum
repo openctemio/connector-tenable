@@ -31,10 +31,10 @@ github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsRe
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
-github.com/openctemio/contract v1.5.1 h1:OL2wXl+anEA5gMA/akc0byiGijxyrbj8weIJBmdFajM=
-github.com/openctemio/contract v1.5.1/go.mod h1:HxX5pwiijz4RjtUWUjbqsFMIUPMOPx4kyPnsoXVhwW4=
-github.com/openctemio/ctis/v2 v2.0.1 h1:KGRtKPLTuo1yl9QU1lxAnhuKpb7RPwRukEdvWfzI8HE=
-github.com/openctemio/ctis/v2 v2.0.1/go.mod h1:BaBATGBV/+qKDaElbacvp8OXHLQj7MB/52ViXTNvmSk=
+github.com/openctemio/contract v1.6.1-0.20261112042759-cf68d4ca7454 h1:EttmwCmbCCENftQA19WA5Q8NMENLv2hKf1PwtLVHhJ0=
+github.com/openctemio/contract v1.6.1-0.20261112042759-cf68d4ca7454/go.mod h1:HxX5pwiijz4RjtUWUjbqsFMIUPMOPx4kyPnsoXVhwW4=
+github.com/openctemio/ctis/v2 v2.0.3 h1:6Da/PSpZlsXNRU5GNeZNr8udj7Jbw9ICa+fUym/t2DE=
+github.com/openctemio/ctis/v2 v2.0.3/go.mod h1:BaBATGBV/+qKDaElbacvp8OXHLQj7MB/52ViXTNvmSk=
 github.com/openctemio/ctis/v2/interop/csaf v0.1.0 h1:abP8MV/a2gfzztYyAlEtgQi9e3orpbPr3+4GugLa+H4=
 github.com/openctemio/ctis/v2/interop/csaf v0.1.0/go.mod h1:oiEXv0dBPNMfoou9pIKZyDnprsvGHYV+wJTlzGTJhJQ=
 github.com/openctemio/ctis/v2/interop/cyclonedx v0.1.0 h1:x50GyqignhVpfuDE7aheOMDqMlnIhXOXe9uYQ0hkXx0=
@@ -45,8 +45,8 @@ github.com/openctemio/ctis/v2/interop/sarif v0.1.0 h1:2dK8SYu2Y/soZBM5UOTIlaLzrU
 github.com/openctemio/ctis/v2/interop/sarif v0.1.0/go.mod h1:ARJgk9nOK/kzPmXymt41HVP+aOn+j8BGDO8YRKCJUzQ=
 github.com/openctemio/ctis/v2/interop/spdx v0.1.0 h1:K5TuTScidghvGRvsvL6UR9uzQuAyQpR+S7b90ExdwMI=
 github.com/openctemio/ctis/v2/interop/spdx v0.1.0/go.mod h1:Z2QqE5zD0X6reTQxcbsXPDM9vD7T0DvofSFNEkr/0RY=
-github.com/openctemio/sdk-go v0.47.4 h1:tgO/BAPrjDopKvuPS/ZQf+VlVeMlsx5y/Fo0/St4Y68=
-github.com/openctemio/sdk-go v0.47.4/go.mod h1:2jxcWq+I3sD6qWdWBxQyE/+jo2SFSWkUrtEjFQRDK74=
+github.com/openctemio/sdk-go v0.51.0 h1:HmwkGYTRByz+3f+9LZK/llEXnKn3MgMNwiSkHuYW5Hg=
+github.com/openctemio/sdk-go v0.51.0/go.mod h1:H9RWZCul6kG7SHLqv2us4QPruQ6X9zpSTOICYnpw0Dg=
 github.com/prometheus/client_golang v1.25.0 h1:cDtW1TcFsMi1RJc8khwCKB4VhzwV04aKqbYtNOXuiK0=
 github.com/prometheus/client_golang v1.25.0/go.mod h1:j2X/4/kaQHLPnmyEU8zjmkndo1T317VpCIQEml8LTKk=
 github.com/prometheus/client_model v0.6.3 h1:O0jaTVAYNxTHYInEPFJt5I3+sN8zqBtVMPTB1qyxiEo=
@@ -55,6 +55,8 @@ github.com/prometheus/common v0.72.0 h1:tAYsE+sPJxIncDAobm4H5aQjmox9ZxEIIqPbiffa
 github.com/prometheus/common v0.72.0/go.mod h1:77NWqAQ2tXT7BIK40qjJdw5Acrsrg1TlHAnsQi3i6mk=
 github.com/prometheus/procfs v0.22.0 h1:6q9+/JL9IKAPbCmBrv9n5O5Ty3NKnciV5X7YGw0oics=
 github.com/prometheus/procfs v0.22.0/go.mod h1:CvmFr/GVhIjIvWJZW3tgkODBQMRIf0EyWMQLHCHab58=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 h1:1EYB5IzjZawrrnELUi78f9fPu57HuXjmddZPjrls/28=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.3/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 gitlab.com/gitlab-org/api/client-go v1.46.0 h1:YxBWFZIFYKcGESCb9fpkwzouo+apyB9pr/XTWzNoL24=
